@@ -11,6 +11,7 @@ provider and assert on histogram observations.
 
 # Standard
 from dataclasses import dataclass
+import json
 import time
 
 # Third Party
@@ -113,6 +114,28 @@ def subscriber(bus):
 
 
 class TestL0NewAllocation:
+    def test_boundary_evidence_records_processed_events(self, bus, subscriber, tmp_path, monkeypatch):
+        evidence_path = tmp_path / "l0-boundary.jsonl"
+        monkeypatch.setenv("INFERGUARD_L0_BLOCK_BOUNDARY_EVIDENCE_PATH", str(evidence_path))
+        bus.start()
+
+        bus.publish(
+            _make_allocation_event(
+                [FakeBlockAllocationRecord("req-1", [0, 1], [10, 20])]
+            )
+        )
+        time.sleep(_DRAIN_WAIT)
+
+        [event] = [
+            json.loads(line)
+            for line in evidence_path.read_text(encoding="utf-8").splitlines()
+        ]
+        assert event["source"] == "lmcache_l0_lifecycle_subscriber"
+        assert event["stage"] == "l0_lifecycle_subscriber_processed"
+        assert event["records"] == [{"request_id": "req-1", "block_count": 2}]
+        assert event["metrics_updated_count"] == 0
+        assert "new_token_ids" not in json.dumps(event)
+
     def test_new_block_no_metrics_emitted(self, bus, subscriber):
         count_before = _get_histogram_count("lmcache_mp.l0_block_lifetime_seconds")
         bus.start()

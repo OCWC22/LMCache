@@ -3,8 +3,10 @@
 # Standard
 from dataclasses import dataclass
 from typing import Any, Callable
+import json
 import os
 import threading
+import time
 
 # Third Party
 import torch
@@ -30,6 +32,36 @@ logger = init_logger(__name__)
 DEFAULT_MQ_TIMEOUT: float = 300.0
 # Interval (seconds) between periodic heartbeat pings to the server.
 DEFAULT_HEARTBEAT_INTERVAL: float = 10.0
+L0_BLOCK_BOUNDARY_EVIDENCE_ENV = "INFERGUARD_L0_BLOCK_BOUNDARY_EVIDENCE_PATH"
+
+
+def _append_l0_block_boundary_event(
+    source: str,
+    stage: str,
+    records: list[BlockAllocationRecord],
+) -> None:
+    """Append redacted L0 block-allocation boundary evidence when requested."""
+    path = os.environ.get(L0_BLOCK_BOUNDARY_EVIDENCE_ENV, "").strip()
+    if not path:
+        return
+    payload = {
+        "schema_version": "inferguard-l0-block-boundary-event/v1",
+        "source": source,
+        "stage": stage,
+        "timestamp_unix": time.time(),
+        "records": [
+            {
+                "request_id": record.req_id,
+                "block_count": len(record.new_block_ids),
+            }
+            for record in records
+        ],
+    }
+    try:
+        with open(path, "a", encoding="utf-8") as handle:
+            handle.write(json.dumps(payload, sort_keys=True) + "\n")
+    except OSError:
+        logger.debug("Failed to append L0 block boundary evidence", exc_info=True)
 
 
 def wrap_kv_caches(kv_caches: dict[str, torch.Tensor]) -> KVCache:
@@ -607,6 +639,11 @@ class LMCacheMPSchedulerAdapter:
         if not self.is_healthy or not records:
             return
 
+        _append_l0_block_boundary_event(
+            "lmcache_vllm_multi_process_adapter",
+            "report_block_allocation_mq_submit",
+            records,
+        )
         send_lmcache_request(
             self.mq_client,
             RequestType.REPORT_BLOCK_ALLOCATION,
