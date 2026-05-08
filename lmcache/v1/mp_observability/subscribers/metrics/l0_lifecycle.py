@@ -135,6 +135,20 @@ class L0LifecycleSubscriber(EventSubscriber):
         self._metrics_updated_count = 0
 
         meter = metrics.get_meter("lmcache.l0")
+        self._allocation_records_counter = meter.create_counter(
+            "lmcache_mp.l0_block_allocation_records",
+            description=(
+                "Total vLLM block allocation records processed by the "
+                "L0 lifecycle subscriber."
+            ),
+        )
+        self._allocated_blocks_counter = meter.create_counter(
+            "lmcache_mp.l0_block_allocated_blocks",
+            description=(
+                "Total vLLM GPU KV cache block IDs processed by the "
+                "L0 lifecycle subscriber."
+            ),
+        )
         self._lifetime_hist = meter.create_histogram(
             "lmcache_mp.l0_block_lifetime_seconds",
             description=(
@@ -177,6 +191,20 @@ class L0LifecycleSubscriber(EventSubscriber):
         now = event.timestamp or time.time()
 
         metrics_before = self._metrics_updated_count
+        attrs = {
+            "instance_id": str(instance_id),
+            "model_name": model_name,
+        }
+        block_count = sum(
+            len(getattr(record, "new_block_ids", []) or []) for record in records
+        )
+        if records:
+            self._allocation_records_counter.add(len(records), attrs)
+            self._metrics_updated_count += 1
+        if block_count:
+            self._allocated_blocks_counter.add(block_count, attrs)
+            self._metrics_updated_count += 1
+
         for record in records:
             self._process_record(instance_id, model_name, record, now)
         _append_l0_block_boundary_event(
