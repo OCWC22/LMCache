@@ -5,6 +5,8 @@ from functools import partial
 from itertools import islice
 from typing import Generator
 import argparse
+import json
+import os
 import threading
 import time
 
@@ -70,6 +72,36 @@ from lmcache.v1.multiprocess.token_hasher import TokenHasher
 import lmcache.c_ops as lmc_ops
 
 logger = init_logger(__name__)
+L0_BLOCK_BOUNDARY_EVIDENCE_ENV = "INFERGUARD_L0_BLOCK_BOUNDARY_EVIDENCE_PATH"
+
+
+def _append_l0_block_boundary_event(
+    source: str,
+    stage: str,
+    records: list[BlockAllocationRecord],
+) -> None:
+    """Append redacted L0 block-allocation boundary evidence when requested."""
+    path = os.environ.get(L0_BLOCK_BOUNDARY_EVIDENCE_ENV, "").strip()
+    if not path:
+        return
+    payload = {
+        "schema_version": "inferguard-l0-block-boundary-event/v1",
+        "source": source,
+        "stage": stage,
+        "timestamp_unix": time.time(),
+        "records": [
+            {
+                "request_id": record.req_id,
+                "block_count": len(record.new_block_ids),
+            }
+            for record in records
+        ],
+    }
+    try:
+        with open(path, "a", encoding="utf-8") as handle:
+            handle.write(json.dumps(payload, sort_keys=True) + "\n")
+    except OSError:
+        logger.debug("Failed to append L0 block boundary evidence", exc_info=True)
 
 
 # Helper functions
@@ -1054,6 +1086,11 @@ class MPCacheEngine:
             records: List of BlockAllocationRecord with per-request
                 block and token allocation deltas.
         """
+        _append_l0_block_boundary_event(
+            "lmcache_mp_server",
+            "report_block_allocation_received",
+            records,
+        )
         self._event_bus.publish(
             Event(
                 event_type=EventType.MP_VLLM_BLOCK_ALLOCATION,

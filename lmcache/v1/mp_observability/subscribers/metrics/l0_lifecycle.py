@@ -37,6 +37,8 @@ from __future__ import annotations
 from collections import deque
 from dataclasses import dataclass, field
 from enum import Enum
+import json
+import os
 import random
 import time
 
@@ -49,6 +51,39 @@ from lmcache.v1.mp_observability.event_bus import EventCallback, EventSubscriber
 
 # Maximum number of recent access timestamps kept per block (ring buffer).
 _MAX_ACCESS_HISTORY = 4
+L0_BLOCK_BOUNDARY_EVIDENCE_ENV = "INFERGUARD_L0_BLOCK_BOUNDARY_EVIDENCE_PATH"
+
+
+def _append_l0_block_boundary_event(
+    stage: str,
+    records: list[object],
+    *,
+    metrics_updated_count: int | None = None,
+) -> None:
+    """Append redacted L0 subscriber boundary evidence when requested."""
+    path = os.environ.get(L0_BLOCK_BOUNDARY_EVIDENCE_ENV, "").strip()
+    if not path:
+        return
+    payload = {
+        "schema_version": "inferguard-l0-block-boundary-event/v1",
+        "source": "lmcache_l0_lifecycle_subscriber",
+        "stage": stage,
+        "timestamp_unix": time.time(),
+        "records": [
+            {
+                "request_id": getattr(record, "req_id", ""),
+                "block_count": len(getattr(record, "new_block_ids", []) or []),
+            }
+            for record in records
+        ],
+    }
+    if metrics_updated_count is not None:
+        payload["metrics_updated_count"] = metrics_updated_count
+    try:
+        with open(path, "a", encoding="utf-8") as handle:
+            handle.write(json.dumps(payload, sort_keys=True) + "\n")
+    except OSError:
+        pass
 
 
 class _BlockStatus(Enum):
@@ -97,6 +132,7 @@ class L0LifecycleSubscriber(EventSubscriber):
         self._skipped: set[tuple[int, int]] = set()
         # Reverse index: req_id -> set of (instance_id, block_id) owned.
         self._req_blocks: dict[str, set[tuple[int, int]]] = {}
+        self._metrics_updated_count = 0
 
         meter = metrics.get_meter("lmcache.l0")
         self._lifetime_hist = meter.create_histogram(
@@ -140,8 +176,14 @@ class L0LifecycleSubscriber(EventSubscriber):
         records = event.metadata.get("records", [])
         now = event.timestamp or time.time()
 
+        metrics_before = self._metrics_updated_count
         for record in records:
             self._process_record(instance_id, model_name, record, now)
+        _append_l0_block_boundary_event(
+            "l0_lifecycle_subscriber_processed",
+            records,
+            metrics_updated_count=self._metrics_updated_count - metrics_before,
+        )
 
     def _on_end_session(self, event: Event) -> None:
         """Handle request completion — release blocks owned by this request."""
@@ -277,12 +319,14 @@ class L0LifecycleSubscriber(EventSubscriber):
 
         self._lifetime_hist.record(lifetime, attrs)
         self._idle_hist.record(idle_time, attrs)
+        self._metrics_updated_count += 2
 
         # Reuse gaps from access history.
         history = list(state.access_history)
         for i in range(1, len(history)):
             gap = history[i] - history[i - 1]
             self._reuse_gap_hist.record(gap, attrs)
+            self._metrics_updated_count += 1
 
     # -- Sampling ----------------------------------------------------------
 
