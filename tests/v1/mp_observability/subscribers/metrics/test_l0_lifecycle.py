@@ -23,6 +23,9 @@ import pytest
 # First Party
 from lmcache.v1.mp_observability.event import Event, EventType
 from lmcache.v1.mp_observability.event_bus import EventBus, EventBusConfig
+from lmcache.v1.mp_observability.l0_boundary_evidence import (
+    L0_BLOCK_BOUNDARY_EVIDENCE_ENV,
+)
 from lmcache.v1.mp_observability.subscribers.metrics.l0_lifecycle import (
     L0LifecycleSubscriber,
     _BlockStatus,
@@ -138,17 +141,25 @@ def subscriber(bus):
 
 
 class TestL0NewAllocation:
-    def test_boundary_evidence_records_processed_events(self, bus, subscriber, tmp_path, monkeypatch):
+    def test_boundary_evidence_records_processed_events(
+        self,
+        bus,
+        subscriber,
+        tmp_path,
+        monkeypatch,
+    ):
         evidence_path = tmp_path / "l0-boundary.jsonl"
-        monkeypatch.setenv("INFERGUARD_L0_BLOCK_BOUNDARY_EVIDENCE_PATH", str(evidence_path))
+        monkeypatch.setenv(L0_BLOCK_BOUNDARY_EVIDENCE_ENV, str(evidence_path))
         bus.start()
-
-        bus.publish(
-            _make_allocation_event(
-                [FakeBlockAllocationRecord("req-1", [0, 1], [10, 20])]
+        try:
+            bus.publish(
+                _make_allocation_event(
+                    [FakeBlockAllocationRecord("req-1", [0, 1], [10, 20])]
+                )
             )
-        )
-        time.sleep(_DRAIN_WAIT)
+            time.sleep(_DRAIN_WAIT)
+        finally:
+            bus.stop()
 
         [event] = [
             json.loads(line)
@@ -200,7 +211,9 @@ from prometheus_client import REGISTRY, generate_latest
 
 from lmcache.v1.mp_observability.event import Event, EventType
 from lmcache.v1.mp_observability.event_bus import EventBus, EventBusConfig
-from lmcache.v1.mp_observability.subscribers.metrics.l0_lifecycle import L0LifecycleSubscriber
+from lmcache.v1.mp_observability.subscribers.metrics.l0_lifecycle import (
+    L0LifecycleSubscriber,
+)
 
 @dataclass
 class Rec:
