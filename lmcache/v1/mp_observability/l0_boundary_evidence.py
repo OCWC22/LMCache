@@ -16,6 +16,30 @@ from lmcache.logging import init_logger
 logger = init_logger(__name__)
 
 L0_BLOCK_BOUNDARY_EVIDENCE_ENV = "INFERGUARD_L0_BLOCK_BOUNDARY_EVIDENCE_PATH"
+_cached_l0_block_boundary_evidence_path = ""
+_l0_block_boundary_evidence_path_initialized = False
+
+
+def _get_l0_block_boundary_evidence_path() -> str:
+    """Return the cached opt-in boundary evidence path."""
+    global _cached_l0_block_boundary_evidence_path
+    global _l0_block_boundary_evidence_path_initialized
+
+    if not _l0_block_boundary_evidence_path_initialized:
+        _cached_l0_block_boundary_evidence_path = os.environ.get(
+            L0_BLOCK_BOUNDARY_EVIDENCE_ENV, ""
+        ).strip()
+        _l0_block_boundary_evidence_path_initialized = True
+    return _cached_l0_block_boundary_evidence_path
+
+
+def reset_l0_block_boundary_evidence_path_cache() -> None:
+    """Reset cached boundary evidence path for tests that patch the env."""
+    global _cached_l0_block_boundary_evidence_path
+    global _l0_block_boundary_evidence_path_initialized
+
+    _cached_l0_block_boundary_evidence_path = ""
+    _l0_block_boundary_evidence_path_initialized = False
 
 
 def append_l0_block_boundary_event(
@@ -35,7 +59,7 @@ def append_l0_block_boundary_event(
         metrics_updated_count: Optional count of metric instruments updated while
             processing the records.
     """
-    path = os.environ.get(L0_BLOCK_BOUNDARY_EVIDENCE_ENV, "").strip()
+    path = _get_l0_block_boundary_evidence_path()
     if not path:
         return
 

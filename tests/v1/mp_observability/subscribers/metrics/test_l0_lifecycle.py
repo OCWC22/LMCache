@@ -25,6 +25,7 @@ from lmcache.v1.mp_observability.event import Event, EventType
 from lmcache.v1.mp_observability.event_bus import EventBus, EventBusConfig
 from lmcache.v1.mp_observability.l0_boundary_evidence import (
     L0_BLOCK_BOUNDARY_EVIDENCE_ENV,
+    reset_l0_block_boundary_evidence_path_cache,
 )
 from lmcache.v1.mp_observability.subscribers.metrics.l0_lifecycle import (
     L0LifecycleSubscriber,
@@ -150,6 +151,7 @@ class TestL0NewAllocation:
     ):
         evidence_path = tmp_path / "l0-boundary.jsonl"
         monkeypatch.setenv(L0_BLOCK_BOUNDARY_EVIDENCE_ENV, str(evidence_path))
+        reset_l0_block_boundary_evidence_path_cache()
         bus.start()
         try:
             bus.publish(
@@ -160,6 +162,7 @@ class TestL0NewAllocation:
             time.sleep(_DRAIN_WAIT)
         finally:
             bus.stop()
+            reset_l0_block_boundary_evidence_path_cache()
 
         [event] = [
             json.loads(line)
