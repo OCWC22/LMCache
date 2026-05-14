@@ -4,6 +4,9 @@
 
 # Standard
 import json
+import subprocess
+import sys
+import textwrap
 import time
 
 # Third Party
@@ -21,8 +24,8 @@ from lmcache.v1.mp_observability.subscribers.metrics.cb_server import (
 )
 from tests.v1.mp_observability.subscribers.metrics.otel_setup import (
     counter_delta,
-    read_counters,
     reader as _reader,
+    read_counters,
 )
 
 _DRAIN_WAIT = 0.15
@@ -567,6 +570,73 @@ class TestBlendL0GpuObservability:
             )
             == 0
         )
+
+    def test_cb_l0_metrics_export_to_prometheus(self):
+        code = r'''
+import os
+import sys
+import time
+
+from opentelemetry import metrics
+from opentelemetry.exporter.prometheus import PrometheusMetricReader
+from opentelemetry.sdk.metrics import MeterProvider
+from prometheus_client import REGISTRY, generate_latest
+
+from lmcache.v1.mp_observability.event import Event, EventType
+from lmcache.v1.mp_observability.event_bus import EventBus, EventBusConfig
+from lmcache.v1.mp_observability.subscribers.metrics.cb_server import (
+    BlendMetricsSubscriber,
+)
+
+reader = PrometheusMetricReader()
+metrics.set_meter_provider(MeterProvider(metric_readers=[reader]))
+bus = EventBus(EventBusConfig(enabled=True, max_queue_size=100))
+bus.register_subscriber(BlendMetricsSubscriber())
+bus.start()
+bus.publish(Event(
+    event_type=EventType.CB_RETRIEVE_START,
+    session_id="req-prometheus",
+    metadata={"instance_id": 11, "num_chunks": 5, "num_tokens": 1280},
+))
+bus.publish(Event(
+    event_type=EventType.CB_RETRIEVE_END,
+    session_id="req-prometheus",
+    metadata={
+        "instance_id": 11,
+        "num_chunks": 5,
+        "num_tokens": 1280,
+        "success": True,
+        "token_ids": [101, 102],
+        "block_ids": [7, 8],
+        "hashes": ["secret-hash"],
+        "object_keys": ["secret-key"],
+    },
+))
+time.sleep(0.2)
+bus.stop()
+for line in generate_latest(REGISTRY).decode().splitlines():
+    if "lmcache_blend_l0_gpu" in line:
+        print(line)
+sys.stdout.flush()
+os._exit(0)
+'''
+        result = subprocess.run(
+            [sys.executable, "-c", textwrap.dedent(code)],
+            check=True,
+            capture_output=True,
+            text=True,
+            timeout=15,
+        )
+        assert "lmcache_blend_l0_gpu_operation_duration_seconds" in result.stdout
+        assert "lmcache_blend_l0_gpu_transfer_chunks_total" in result.stdout
+        assert "lmcache_blend_l0_gpu_transfer_tokens_total" in result.stdout
+        assert 'operation="retrieve_pre_computed"' in result.stdout
+        assert 'direction="l1_to_gpu"' in result.stdout
+        assert 'instance_id="11"' in result.stdout
+        assert "token_ids" not in result.stdout
+        assert "block_ids" not in result.stdout
+        assert "secret-hash" not in result.stdout
+        assert "secret-key" not in result.stdout
 
     def test_cb_l0_boundary_evidence_is_redacted(
         self, bus, subscriber, tmp_path, monkeypatch
