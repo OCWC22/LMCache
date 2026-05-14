@@ -84,3 +84,48 @@ def append_l0_block_boundary_event(
             handle.write(json.dumps(payload, sort_keys=True) + "\n")
     except OSError:
         logger.debug("Failed to append L0 block boundary evidence", exc_info=True)
+
+
+def append_cb_l0_boundary_event(
+    source: str,
+    stage: str,
+    request_id: str,
+    operation: str,
+    *,
+    instance_id: object | None = None,
+    num_chunks: object | None = None,
+    num_tokens: object | None = None,
+    success: object | None = None,
+) -> None:
+    """Append redacted CacheBlend L0 GPU-buffer boundary evidence.
+
+    This uses the same opt-in path as block-allocation evidence.  The payload
+    intentionally carries only request-level and aggregate counters; token IDs,
+    block IDs, hashes, and object keys are never accepted as fields here.
+    """
+    path = _get_l0_block_boundary_evidence_path()
+    if not path:
+        return
+
+    payload: dict[str, object] = {
+        "schema_version": "inferguard-cb-l0-boundary-event/v1",
+        "source": source,
+        "stage": stage,
+        "timestamp_unix": time.time(),
+        "request_id": request_id,
+        "operation": operation,
+    }
+    if instance_id is not None:
+        payload["instance_id"] = instance_id
+    if num_chunks is not None:
+        payload["num_chunks"] = int(num_chunks)
+    if num_tokens is not None:
+        payload["num_tokens"] = int(num_tokens)
+    if success is not None:
+        payload["success"] = bool(success)
+
+    try:
+        with open(path, "a", encoding="utf-8") as handle:
+            handle.write(json.dumps(payload, sort_keys=True) + "\n")
+    except OSError:
+        logger.debug("Failed to append CB L0 boundary evidence", exc_info=True)

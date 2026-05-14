@@ -3,6 +3,7 @@
 """Tests for BlendMetricsSubscriber."""
 
 # Standard
+import json
 import time
 
 # Third Party
@@ -11,15 +12,71 @@ import pytest
 # First Party
 from lmcache.v1.mp_observability.event import Event, EventType
 from lmcache.v1.mp_observability.event_bus import EventBus, EventBusConfig
+from lmcache.v1.mp_observability.l0_boundary_evidence import (
+    L0_BLOCK_BOUNDARY_EVIDENCE_ENV,
+    reset_l0_block_boundary_evidence_path_cache,
+)
 from lmcache.v1.mp_observability.subscribers.metrics.cb_server import (
     BlendMetricsSubscriber,
 )
 from tests.v1.mp_observability.subscribers.metrics.otel_setup import (
     counter_delta,
     read_counters,
+    reader as _reader,
 )
 
 _DRAIN_WAIT = 0.15
+
+
+def _read_histograms() -> dict[str, list]:
+    data = _reader.get_metrics_data()
+    result: dict[str, list] = {}
+    if data is None:
+        return result
+    for resource_metrics in data.resource_metrics:
+        for scope_metrics in resource_metrics.scope_metrics:
+            for metric in scope_metrics.metrics:
+                if not metric.name.startswith("lmcache_blend.l0_gpu"):
+                    continue
+                result[metric.name] = list(metric.data.data_points)
+    return result
+
+
+def _histogram_count(name: str) -> int:
+    return sum(dp.count for dp in _read_histograms().get(name, []))
+
+
+def _histogram_attrs(name: str) -> list[dict]:
+    return [
+        dict(dp.attributes)
+        for dp in _read_histograms().get(name, [])
+        if getattr(dp, "count", 0) > 0
+    ]
+
+
+def _read_counter_points() -> dict[str, list]:
+    data = _reader.get_metrics_data()
+    result: dict[str, list] = {}
+    if data is None:
+        return result
+    for resource_metrics in data.resource_metrics:
+        for scope_metrics in resource_metrics.scope_metrics:
+            for metric in scope_metrics.metrics:
+                if not metric.name.startswith("lmcache_blend.l0_gpu"):
+                    continue
+                points = [dp for dp in metric.data.data_points if hasattr(dp, "value")]
+                if points:
+                    result[metric.name] = points
+    return result
+
+
+def _counter_sum(name: str, **attrs: object) -> int:
+    total = 0
+    for dp in _read_counter_points().get(name, []):
+        dp_attrs = dict(dp.attributes)
+        if all(dp_attrs.get(k) == v for k, v in attrs.items()):
+            total += int(dp.value)
+    return total
 
 
 @pytest.fixture
@@ -59,13 +116,13 @@ class TestBlendMetricsSubscriber:
         assert EventType.CB_FINGERPRINTS_REGISTERED in subs
         assert EventType.CB_CHUNKS_EVICTED in subs
 
-    def test_no_subscription_for_lifecycle_sentinels(self, subscriber):
+    def test_subscribes_to_gpu_lifecycle_sentinels_for_l0_evidence(self, subscriber):
         subs = subscriber.get_subscriptions()
         assert EventType.CB_REQUEST_START not in subs
         assert EventType.CB_REQUEST_END not in subs
-        assert EventType.CB_STORE_PRE_COMPUTED_SUBMITTED not in subs
-        assert EventType.CB_RETRIEVE_SUBMITTED not in subs
-        assert EventType.CB_STORE_FINAL_SUBMITTED not in subs
+        assert EventType.CB_STORE_PRE_COMPUTED_SUBMITTED in subs
+        assert EventType.CB_RETRIEVE_SUBMITTED in subs
+        assert EventType.CB_STORE_FINAL_SUBMITTED in subs
 
     def test_lookup_start_increments_counter(self, bus, subscriber):
         bus.start()
@@ -399,3 +456,183 @@ class TestBlendLookupHitTokenCounters:
         assert delta["lmcache_blend.lookup_requested_tokens"] == 2816
         # 3*256 + 2*128 = 768 + 256 = 1024
         assert delta["lmcache_blend.lookup_hit_tokens"] == 1024
+
+
+class TestBlendL0GpuObservability:
+    def test_store_pre_computed_records_l0_duration_and_transfer_counters(
+        self, bus, subscriber
+    ):
+        duration_before = _histogram_count(
+            "lmcache_blend.l0_gpu_operation_duration_seconds"
+        )
+        bus.start()
+        bus.publish(
+            Event(
+                event_type=EventType.CB_STORE_PRE_COMPUTED_START,
+                session_id="req-store-pre",
+                timestamp=100.0,
+                metadata={"instance_id": 7, "num_tokens": 512},
+            )
+        )
+        bus.publish(
+            Event(
+                event_type=EventType.CB_STORE_PRE_COMPUTED_END,
+                session_id="req-store-pre",
+                timestamp=100.125,
+                metadata={
+                    "instance_id": 7,
+                    "num_tokens": 512,
+                    "stored_chunks": 2,
+                    "success": True,
+                },
+            )
+        )
+        time.sleep(_DRAIN_WAIT)
+        bus.stop()
+
+        assert (
+            _histogram_count("lmcache_blend.l0_gpu_operation_duration_seconds")
+            - duration_before
+        ) == 1
+        assert {
+            "operation": "store_pre_computed",
+            "instance_id": 7,
+            "success": True,
+        } in _histogram_attrs("lmcache_blend.l0_gpu_operation_duration_seconds")
+        assert (
+            _counter_sum(
+                "lmcache_blend.l0_gpu_transfer_chunks",
+                operation="store_pre_computed",
+                instance_id=7,
+                direction="gpu_to_l1",
+            )
+            >= 2
+        )
+        assert (
+            _counter_sum(
+                "lmcache_blend.l0_gpu_transfer_tokens",
+                operation="store_pre_computed",
+                instance_id=7,
+                direction="gpu_to_l1",
+            )
+            >= 512
+        )
+
+    def test_retrieve_records_l0_transfer_direction_and_failure_duration(
+        self, bus, subscriber
+    ):
+        duration_before = _histogram_count(
+            "lmcache_blend.l0_gpu_operation_duration_seconds"
+        )
+        bus.start()
+        bus.publish(
+            Event(
+                event_type=EventType.CB_RETRIEVE_START,
+                session_id="req-retrieve",
+                timestamp=200.0,
+                metadata={"instance_id": 3, "num_chunks": 4, "num_tokens": 1024},
+            )
+        )
+        bus.publish(
+            Event(
+                event_type=EventType.CB_RETRIEVE_END,
+                session_id="req-retrieve",
+                timestamp=200.250,
+                metadata={
+                    "instance_id": 3,
+                    "num_chunks": 4,
+                    "num_tokens": 1024,
+                    "success": False,
+                },
+            )
+        )
+        time.sleep(_DRAIN_WAIT)
+        bus.stop()
+
+        assert (
+            _histogram_count("lmcache_blend.l0_gpu_operation_duration_seconds")
+            - duration_before
+        ) == 1
+        assert {
+            "operation": "retrieve_pre_computed",
+            "instance_id": 3,
+            "success": False,
+        } in _histogram_attrs("lmcache_blend.l0_gpu_operation_duration_seconds")
+        assert (
+            _counter_sum(
+                "lmcache_blend.l0_gpu_transfer_chunks",
+                operation="retrieve_pre_computed",
+                instance_id=3,
+                direction="l1_to_gpu",
+            )
+            == 0
+        )
+
+    def test_cb_l0_boundary_evidence_is_redacted(
+        self, bus, subscriber, tmp_path, monkeypatch
+    ):
+        evidence_path = tmp_path / "cb-l0-boundary.jsonl"
+        monkeypatch.setenv(L0_BLOCK_BOUNDARY_EVIDENCE_ENV, str(evidence_path))
+        reset_l0_block_boundary_evidence_path_cache()
+        bus.start()
+        try:
+            bus.publish(
+                Event(
+                    event_type=EventType.CB_STORE_FINAL_SUBMITTED,
+                    session_id="req-secret",
+                    metadata={
+                        "instance_id": 9,
+                        "num_chunks": 3,
+                        "num_tokens": 768,
+                        "token_ids": [1, 2, 3],
+                        "hashes": ["secret-hash"],
+                        "block_ids": [10, 11],
+                        "object_keys": ["secret-key"],
+                    },
+                )
+            )
+            bus.publish(
+                Event(
+                    event_type=EventType.CB_STORE_FINAL_START,
+                    session_id="req-secret",
+                    metadata={"instance_id": 9, "num_tokens": 768},
+                )
+            )
+            bus.publish(
+                Event(
+                    event_type=EventType.CB_STORE_FINAL_END,
+                    session_id="req-secret",
+                    metadata={
+                        "instance_id": 9,
+                        "num_tokens": 768,
+                        "stored_chunks": 3,
+                        "success": True,
+                    },
+                )
+            )
+            time.sleep(_DRAIN_WAIT)
+        finally:
+            bus.stop()
+            reset_l0_block_boundary_evidence_path_cache()
+
+        events = [
+            json.loads(line)
+            for line in evidence_path.read_text(encoding="utf-8").splitlines()
+        ]
+        assert [event["stage"] for event in events] == [
+            "cb_store_final_submitted",
+            "cb_store_final_gpu_start",
+            "cb_store_final_gpu_end",
+        ]
+        assert events[0]["schema_version"] == "inferguard-cb-l0-boundary-event/v1"
+        assert events[0]["request_id"] == "req-secret"
+        assert events[0]["operation"] == "store_final"
+        assert events[0]["instance_id"] == 9
+        assert events[0]["num_chunks"] == 3
+        assert events[0]["num_tokens"] == 768
+        assert events[-1]["success"] is True
+        redacted = json.dumps(events)
+        assert "token_ids" not in redacted
+        assert "secret-hash" not in redacted
+        assert "block_ids" not in redacted
+        assert "secret-key" not in redacted

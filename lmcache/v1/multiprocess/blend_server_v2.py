@@ -822,7 +822,11 @@ class BlendEngineV2(MPCacheEngine):
             Event(
                 event_type=EventType.CB_STORE_PRE_COMPUTED_SUBMITTED,
                 session_id=key.request_id,
-                metadata={"instance_id": instance_id},
+                metadata={
+                    "instance_id": instance_id,
+                    "num_chunks": num_tokens // self.chunk_size,
+                    "num_tokens": num_tokens,
+                },
             )
         )
         self._event_bus.publish_on_stream(
@@ -951,7 +955,11 @@ class BlendEngineV2(MPCacheEngine):
             Event(
                 event_type=EventType.CB_RETRIEVE_SUBMITTED,
                 session_id=key.request_id,
-                metadata={"instance_id": instance_id},
+                metadata={
+                    "instance_id": instance_id,
+                    "num_chunks": num_chunks,
+                    "num_tokens": num_chunks * self.chunk_size,
+                },
             )
         )
 
@@ -970,7 +978,11 @@ class BlendEngineV2(MPCacheEngine):
                 Event(
                     event_type=EventType.CB_RETRIEVE_START,
                     session_id=key.request_id,
-                    metadata={"instance_id": instance_id, "num_chunks": num_chunks},
+                    metadata={
+                        "instance_id": instance_id,
+                        "num_chunks": num_chunks,
+                        "num_tokens": num_chunks * self.chunk_size,
+                    },
                 ),
             )
 
@@ -988,6 +1000,7 @@ class BlendEngineV2(MPCacheEngine):
                                 metadata={
                                     "instance_id": instance_id,
                                     "num_chunks": num_chunks,
+                                    "num_tokens": num_chunks * self.chunk_size,
                                     "success": False,
                                 },
                             ),
@@ -1017,6 +1030,7 @@ class BlendEngineV2(MPCacheEngine):
                         metadata={
                             "instance_id": instance_id,
                             "num_chunks": num_chunks,
+                            "num_tokens": num_chunks * self.chunk_size,
                             "success": False,
                         },
                     ),
@@ -1046,6 +1060,7 @@ class BlendEngineV2(MPCacheEngine):
                 metadata={
                     "instance_id": instance_id,
                     "num_chunks": num_chunks,
+                    "num_tokens": num_chunks * self.chunk_size,
                     "success": True,
                 },
             ),
@@ -1092,7 +1107,11 @@ class BlendEngineV2(MPCacheEngine):
             Event(
                 event_type=EventType.CB_STORE_FINAL_SUBMITTED,
                 session_id=key.request_id,
-                metadata={"instance_id": instance_id},
+                metadata={
+                    "instance_id": instance_id,
+                    "num_chunks": num_tokens // self.chunk_size,
+                    "num_tokens": num_tokens,
+                },
             )
         )
         self._event_bus.publish(
