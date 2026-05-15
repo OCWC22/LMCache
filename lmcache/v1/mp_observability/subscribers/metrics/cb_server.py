@@ -314,6 +314,7 @@ class BlendMetricsSubscriber(EventSubscriber):
         )
         attrs = {
             "operation": operation,
+            "direction": direction,
             "instance_id": instance_id,
             "success": bool(event.metadata.get("success", True)),
         }

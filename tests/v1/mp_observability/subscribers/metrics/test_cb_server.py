@@ -499,6 +499,7 @@ class TestBlendL0GpuObservability:
         ) == 1
         assert {
             "operation": "store_pre_computed",
+            "direction": "gpu_to_l1",
             "instance_id": 7,
             "success": True,
         } in _histogram_attrs("lmcache_blend.l0_gpu_operation_duration_seconds")
@@ -519,6 +520,54 @@ class TestBlendL0GpuObservability:
                 direction="gpu_to_l1",
             )
             >= 512
+        )
+
+    def test_store_pre_computed_duration_includes_direction_attr(
+        self, bus, subscriber
+    ):
+        """The duration histogram MUST include ``direction`` per METRICS.md."""
+        bus.start()
+        bus.publish(
+            Event(
+                event_type=EventType.CB_STORE_PRE_COMPUTED_START,
+                session_id="req-dir-check",
+                timestamp=300.0,
+                metadata={"instance_id": 5, "num_tokens": 256},
+            )
+        )
+        bus.publish(
+            Event(
+                event_type=EventType.CB_STORE_PRE_COMPUTED_END,
+                session_id="req-dir-check",
+                timestamp=300.05,
+                metadata={
+                    "instance_id": 5,
+                    "num_tokens": 256,
+                    "stored_chunks": 1,
+                    "success": True,
+                },
+            )
+        )
+        time.sleep(_DRAIN_WAIT)
+        bus.stop()
+
+        attrs_list = _histogram_attrs(
+            "lmcache_blend.l0_gpu_operation_duration_seconds"
+        )
+        assert len(attrs_list) >= 1, "Expected at least one duration data point"
+        # The store_pre_computed operation has direction "gpu_to_l1"
+        matching = [
+            a
+            for a in attrs_list
+            if a.get("operation") == "store_pre_computed"
+            and a.get("instance_id") == 5
+        ]
+        assert len(matching) >= 1, (
+            f"No duration point for store_pre_computed/instance_id=5; "
+            f"got {attrs_list}"
+        )
+        assert matching[0]["direction"] == "gpu_to_l1", (
+            f"Expected direction='gpu_to_l1', got attrs={matching[0]}"
         )
 
     def test_retrieve_records_l0_transfer_direction_and_failure_duration(
@@ -558,6 +607,7 @@ class TestBlendL0GpuObservability:
         ) == 1
         assert {
             "operation": "retrieve_pre_computed",
+            "direction": "l1_to_gpu",
             "instance_id": 3,
             "success": False,
         } in _histogram_attrs("lmcache_blend.l0_gpu_operation_duration_seconds")

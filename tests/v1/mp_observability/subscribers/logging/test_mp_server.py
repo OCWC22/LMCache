@@ -109,6 +109,76 @@ class TestMPServerLoggingSubscriber:
         time.sleep(0.15)
         bus.stop()
 
+    def test_block_allocation_no_raw_block_ids(self, bus, subscriber):
+        """Block allocation log must not contain raw block ID integers.
+
+        Redaction policy: debug logs should summarise counts only, not
+        leak raw block IDs (consistent with boundary-evidence and
+        Prometheus redaction).
+        """
+        import logging
+        from dataclasses import dataclass
+
+        from lmcache.v1.mp_observability.event import Event, EventType
+
+        @dataclass
+        class _FakeRecord:
+            req_id: str
+            new_block_ids: list[int]
+            new_token_ids: list[int]
+
+        # Capture log output.
+        messages: list[str] = []
+
+        class _Capture(logging.Handler):
+            def emit(self, record: logging.LogRecord) -> None:
+                messages.append(self.format(record))
+
+        cap = _Capture()
+        sub_logger = logging.getLogger(
+            "lmcache.v1.mp_observability.subscribers.logging.mp_server"
+        )
+        sub_logger.addHandler(cap)
+        sub_logger.setLevel(logging.DEBUG)
+
+        try:
+            bus.start()
+            bus.publish(
+                Event(
+                    event_type=EventType.MP_VLLM_BLOCK_ALLOCATION,
+                    session_id="req-blk",
+                    metadata={
+                        "records": [
+                            _FakeRecord(
+                                req_id="req-blk",
+                                new_block_ids=[100, 200, 300, 400, 500],
+                                new_token_ids=[10, 20, 30, 40, 50],
+                            )
+                        ],
+                    },
+                )
+            )
+            time.sleep(0.15)
+            bus.stop()
+
+            # Find block allocation log messages.
+            alloc_msgs = [m for m in messages if "block allocation" in m]
+            assert alloc_msgs, "Expected at least one block allocation log message"
+
+            # Raw block IDs (the integer values 100, 200, etc.) must NOT
+            # appear in the log output.
+            for msg in alloc_msgs:
+                # The string repr of the list would be "[100, 200, 300, ...]"
+                # or individual integers as standalone words.
+                assert "[100" not in msg, (
+                    f"Raw block ID list leaked in log: {msg}"
+                )
+                assert "num_blocks=" in msg, (
+                    f"Expected num_blocks= summary, got: {msg}"
+                )
+        finally:
+            sub_logger.removeHandler(cap)
+
     def test_multiple_events_no_crash(self, bus, subscriber):
         bus.start()
         for i in range(10):

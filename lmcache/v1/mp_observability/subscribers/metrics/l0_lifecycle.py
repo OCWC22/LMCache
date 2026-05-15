@@ -326,4 +326,17 @@ class L0LifecycleSubscriber(EventSubscriber):
     # -- Sampling ----------------------------------------------------------
 
     def _should_sample(self) -> bool:
+        """Randomly decide whether to sample this block.
+
+        L0 uses ``random.random()`` rather than the deterministic
+        ``hash(key) % prime`` gate used by L1 and SM lifecycle subscribers.
+        Physical GPU blocks are keyed by ``(instance_id, block_id)`` which
+        have high churn — block IDs are reused constantly as vLLM allocates
+        and frees them.  The numeric block ID is therefore not a stable key
+        for hash-based sampling: the same ID might refer to entirely
+        different content across two scheduler steps.  In contrast, L1
+        tracks content-addressed ``ObjectKey``\\s which are stable and
+        uniquely identify a specific KV chunk, making ``hash(key)`` a
+        reliable deterministic sampling gate.
+        """
         return random.random() < self._sample_rate

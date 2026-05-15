@@ -119,6 +119,23 @@ def _read_counter_values() -> dict[str, int]:
     return result
 
 
+def _read_counter_values_by_attrs() -> dict[str, dict[tuple, int]]:
+    """Snapshot counter values keyed by (metric_name, attr_tuple)."""
+    data = _reader.get_metrics_data()
+    result: dict[str, dict[tuple, int]] = {}
+    if data is None:
+        return result
+    for resource_metrics in data.resource_metrics:
+        for scope_metrics in resource_metrics.scope_metrics:
+            for metric in scope_metrics.metrics:
+                for dp in metric.data.data_points:
+                    if not hasattr(dp, "value"):
+                        continue
+                    key = tuple(sorted(dict(dp.attributes).items()))
+                    result.setdefault(metric.name, {})[key] = int(dp.value)
+    return result
+
+
 # ---------------------------------------------------------------------------
 # Fixtures
 # ---------------------------------------------------------------------------
@@ -620,3 +637,101 @@ class TestL0MetricAttributes:
             if a.get("instance_id") == "42" and a.get("model_name") == "llama-7b"
         ]
         assert len(matching) > 0
+
+
+# ---------------------------------------------------------------------------
+# Tests: Subscription surface contract
+# ---------------------------------------------------------------------------
+
+
+class TestL0SubscriptionContract:
+    """Verify get_subscriptions() returns exactly the expected event set."""
+
+    def test_subscriptions_returns_exact_event_set(self):
+        sub = L0LifecycleSubscriber(sample_rate=1.0)
+        subs = sub.get_subscriptions()
+
+        expected_keys = {
+            EventType.MP_VLLM_BLOCK_ALLOCATION,
+            EventType.MP_VLLM_END_SESSION,
+        }
+        assert set(subs.keys()) == expected_keys
+
+    def test_subscriptions_all_values_callable(self):
+        sub = L0LifecycleSubscriber(sample_rate=1.0)
+        subs = sub.get_subscriptions()
+
+        assert all(callable(v) for v in subs.values())
+
+
+# ---------------------------------------------------------------------------
+# Tests: Counter attribute strictness
+# ---------------------------------------------------------------------------
+
+
+class TestL0CounterAttributes:
+    """Verify counter data points carry exact attribute dimensions."""
+
+    def test_allocation_counter_attributes_include_instance_id_and_model_name(
+        self, bus, subscriber
+    ):
+        """Counter data points must carry exactly instance_id and model_name.
+
+        We snapshot before/after and look for the new data point created by
+        our event. OTel accumulates across tests in-process, so we must
+        match on the specific (instance_id, model_name) pair rather than
+        assuming only one data point exists.
+        """
+        instance_id = 7
+        model_name = "test-attr-model"
+
+        before = _read_counter_values_by_attrs()
+
+        bus.start()
+        bus.publish(
+            _make_allocation_event(
+                [FakeBlockAllocationRecord("req-attr", [70, 71], [100, 200])],
+                instance_id=instance_id,
+                model_name=model_name,
+            )
+        )
+        time.sleep(_DRAIN_WAIT)
+        bus.stop()
+
+        after = _read_counter_values_by_attrs()
+
+        # Find the data point for our specific (instance_id, model_name).
+        metric_name = "lmcache_mp.l0_block_allocation_records"
+        attr_key = (("instance_id", str(instance_id)), ("model_name", model_name))
+        before_val = before.get(metric_name, {}).get(attr_key, 0)
+        after_val = after.get(metric_name, {}).get(attr_key, 0)
+        assert after_val > before_val, (
+            f"Expected new data point for {attr_key} in {metric_name}"
+        )
+
+        # Verify the data point carries exactly the expected attributes.
+        data = _reader.get_metrics_data()
+        assert data is not None
+        for resource_metrics in data.resource_metrics:
+            for scope_metrics in resource_metrics.scope_metrics:
+                for metric in scope_metrics.metrics:
+                    if metric.name != metric_name:
+                        continue
+                    for dp in metric.data.data_points:
+                        if not hasattr(dp, "value") or int(dp.value) == 0:
+                            continue
+                        attrs = dict(dp.attributes)
+                        if attrs.get("instance_id") != str(instance_id):
+                            continue
+                        if attrs.get("model_name") != model_name:
+                            continue
+                        # Found our data point — verify exact attribute keys.
+                        assert set(attrs.keys()) == {
+                            "instance_id",
+                            "model_name",
+                        }, (
+                            f"Expected exactly {{instance_id, model_name}}, "
+                            f"got {set(attrs.keys())}"
+                        )
+                        return
+        pytest.fail("No matching data point found for the published event")
