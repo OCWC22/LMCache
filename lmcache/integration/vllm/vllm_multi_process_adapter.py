@@ -625,7 +625,7 @@ class LMCacheMPSchedulerAdapter:
 
         append_l0_block_boundary_event(
             "lmcache_vllm_multi_process_adapter",
-            "report_block_allocation_mq_submit",
+            "report_block_allocation_submitted",
             records,
         )
         send_lmcache_request(
