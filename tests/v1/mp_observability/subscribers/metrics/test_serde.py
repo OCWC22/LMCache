@@ -174,75 +174,69 @@ class TestSerdeSubscriberSubscriptions:
 class TestSerdeEncodeMetrics:
     """Encode (serialize) duration + bytes counters."""
 
-    def test_encode_duration_recorded_on_start_end_pair(
-        self, bus, subscriber
-    ):
-        before = _serde_histogram_count(
-            "lmcache_blend.serde_encode_duration_seconds"
-        )
+    def test_encode_duration_recorded_on_start_end_pair(self, bus, subscriber):
+        before = _serde_histogram_count("lmcache_blend.serde_encode_duration_seconds")
         bus.start()
-        bus.publish(
-            Event(
-                event_type=EventType.CB_SERDE_ENCODE_START,
-                session_id="serde-enc-1",
-                timestamp=10.0,
-                metadata={"serde_type": "fp8", "num_objects": 2},
+        try:
+            bus.publish(
+                Event(
+                    event_type=EventType.CB_SERDE_ENCODE_START,
+                    session_id="serde-enc-1",
+                    timestamp=10.0,
+                    metadata={"serde_type": "fp8", "num_objects": 2},
+                )
             )
-        )
-        bus.publish(
-            Event(
-                event_type=EventType.CB_SERDE_ENCODE_END,
-                session_id="serde-enc-1",
-                timestamp=10.05,
-                metadata={
-                    "serde_type": "fp8",
-                    "num_objects": 2,
-                    "bytes_in": 4096,
-                    "bytes_out": 2048,
-                    "success": True,
-                },
+            bus.publish(
+                Event(
+                    event_type=EventType.CB_SERDE_ENCODE_END,
+                    session_id="serde-enc-1",
+                    timestamp=10.05,
+                    metadata={
+                        "serde_type": "fp8",
+                        "num_objects": 2,
+                        "bytes_in": 4096,
+                        "bytes_out": 2048,
+                        "success": True,
+                    },
+                )
             )
-        )
-        time.sleep(_DRAIN_WAIT)
-        bus.stop()
+            time.sleep(_DRAIN_WAIT)
+        finally:
+            bus.stop()
 
-        after = _serde_histogram_count(
-            "lmcache_blend.serde_encode_duration_seconds"
-        )
+        after = _serde_histogram_count("lmcache_blend.serde_encode_duration_seconds")
         assert after - before == 1
 
-    def test_encode_duration_carries_serde_type_attr(
-        self, bus, subscriber
-    ):
+    def test_encode_duration_carries_serde_type_attr(self, bus, subscriber):
         bus.start()
-        bus.publish(
-            Event(
-                event_type=EventType.CB_SERDE_ENCODE_START,
-                session_id="serde-enc-type",
-                timestamp=20.0,
-                metadata={"serde_type": "naive", "num_objects": 1},
+        try:
+            bus.publish(
+                Event(
+                    event_type=EventType.CB_SERDE_ENCODE_START,
+                    session_id="serde-enc-type",
+                    timestamp=20.0,
+                    metadata={"serde_type": "naive", "num_objects": 1},
+                )
             )
-        )
-        bus.publish(
-            Event(
-                event_type=EventType.CB_SERDE_ENCODE_END,
-                session_id="serde-enc-type",
-                timestamp=20.1,
-                metadata={
-                    "serde_type": "naive",
-                    "num_objects": 1,
-                    "bytes_in": 1024,
-                    "bytes_out": 1024,
-                    "success": True,
-                },
+            bus.publish(
+                Event(
+                    event_type=EventType.CB_SERDE_ENCODE_END,
+                    session_id="serde-enc-type",
+                    timestamp=20.1,
+                    metadata={
+                        "serde_type": "naive",
+                        "num_objects": 1,
+                        "bytes_in": 1024,
+                        "bytes_out": 1024,
+                        "success": True,
+                    },
+                )
             )
-        )
-        time.sleep(_DRAIN_WAIT)
-        bus.stop()
+            time.sleep(_DRAIN_WAIT)
+        finally:
+            bus.stop()
 
-        attrs = _serde_histogram_attrs(
-            "lmcache_blend.serde_encode_duration_seconds"
-        )
+        attrs = _serde_histogram_attrs("lmcache_blend.serde_encode_duration_seconds")
         matching = [a for a in attrs if a.get("serde_type") == "naive"]
         assert len(matching) >= 1
         assert matching[0]["success"] is True
@@ -250,34 +244,34 @@ class TestSerdeEncodeMetrics:
 
     def test_decode_duration_carries_num_objects_attr(self, bus, subscriber):
         bus.start()
-        bus.publish(
-            Event(
-                event_type=EventType.CB_SERDE_DECODE_START,
-                session_id="serde-dec-objects",
-                timestamp=22.0,
-                metadata={"serde_type": "fp8", "num_objects": 3},
+        try:
+            bus.publish(
+                Event(
+                    event_type=EventType.CB_SERDE_DECODE_START,
+                    session_id="serde-dec-objects",
+                    timestamp=22.0,
+                    metadata={"serde_type": "fp8", "num_objects": 3},
+                )
             )
-        )
-        bus.publish(
-            Event(
-                event_type=EventType.CB_SERDE_DECODE_END,
-                session_id="serde-dec-objects",
-                timestamp=22.1,
-                metadata={
-                    "serde_type": "fp8",
-                    "num_objects": 3,
-                    "bytes_in": 1024,
-                    "bytes_out": 2048,
-                    "success": True,
-                },
+            bus.publish(
+                Event(
+                    event_type=EventType.CB_SERDE_DECODE_END,
+                    session_id="serde-dec-objects",
+                    timestamp=22.1,
+                    metadata={
+                        "serde_type": "fp8",
+                        "num_objects": 3,
+                        "bytes_in": 1024,
+                        "bytes_out": 2048,
+                        "success": True,
+                    },
+                )
             )
-        )
-        time.sleep(_DRAIN_WAIT)
-        bus.stop()
+            time.sleep(_DRAIN_WAIT)
+        finally:
+            bus.stop()
 
-        attrs = _serde_histogram_attrs(
-            "lmcache_blend.serde_decode_duration_seconds"
-        )
+        attrs = _serde_histogram_attrs("lmcache_blend.serde_decode_duration_seconds")
         matching = [
             a
             for a in attrs
@@ -287,155 +281,153 @@ class TestSerdeEncodeMetrics:
 
     def test_encode_bytes_counters(self, bus, subscriber, snapshot):
         bus.start()
-        bus.publish(
-            Event(
-                event_type=EventType.CB_SERDE_ENCODE_END,
-                session_id="serde-bytes-1",
-                metadata={
-                    "serde_type": "fp8",
-                    "num_objects": 1,
-                    "bytes_in": 8192,
-                    "bytes_out": 4096,
-                    "success": True,
-                },
+        try:
+            bus.publish(
+                Event(
+                    event_type=EventType.CB_SERDE_ENCODE_END,
+                    session_id="serde-bytes-1",
+                    metadata={
+                        "serde_type": "fp8",
+                        "num_objects": 1,
+                        "bytes_in": 8192,
+                        "bytes_out": 4096,
+                        "success": True,
+                    },
+                )
             )
-        )
-        time.sleep(_DRAIN_WAIT)
-        bus.stop()
+            time.sleep(_DRAIN_WAIT)
+        finally:
+            bus.stop()
 
         delta = snapshot()
         assert delta.get("lmcache_blend.serde_bytes_in", 0) >= 8192
         assert delta.get("lmcache_blend.serde_bytes_out", 0) >= 4096
 
-    def test_encode_failure_increments_failure_counter(
-        self, bus, subscriber, snapshot
-    ):
+    def test_encode_failure_increments_failure_counter(self, bus, subscriber, snapshot):
         bus.start()
-        bus.publish(
-            Event(
-                event_type=EventType.CB_SERDE_ENCODE_START,
-                session_id="serde-enc-fail",
-                timestamp=50.0,
-                metadata={"serde_type": "fp8", "num_objects": 1},
+        try:
+            bus.publish(
+                Event(
+                    event_type=EventType.CB_SERDE_ENCODE_START,
+                    session_id="serde-enc-fail",
+                    timestamp=50.0,
+                    metadata={"serde_type": "fp8", "num_objects": 1},
+                )
             )
-        )
-        bus.publish(
-            Event(
-                event_type=EventType.CB_SERDE_ENCODE_END,
-                session_id="serde-enc-fail",
-                timestamp=50.01,
-                metadata={
-                    "serde_type": "fp8",
-                    "num_objects": 1,
-                    "bytes_in": 4096,
-                    "bytes_out": 0,
-                    "success": False,
-                    "failure_reason": "cuda_error",
-                },
+            bus.publish(
+                Event(
+                    event_type=EventType.CB_SERDE_ENCODE_END,
+                    session_id="serde-enc-fail",
+                    timestamp=50.01,
+                    metadata={
+                        "serde_type": "fp8",
+                        "num_objects": 1,
+                        "bytes_in": 4096,
+                        "bytes_out": 0,
+                        "success": False,
+                        "failure_reason": "cuda_error",
+                    },
+                )
             )
-        )
-        time.sleep(_DRAIN_WAIT)
-        bus.stop()
+            time.sleep(_DRAIN_WAIT)
+        finally:
+            bus.stop()
 
         delta = snapshot()
         assert delta.get("lmcache_blend.serde_failures", 0) >= 1
         # Failure should still record duration
-        count = _serde_histogram_count(
-            "lmcache_blend.serde_encode_duration_seconds"
-        )
+        count = _serde_histogram_count("lmcache_blend.serde_encode_duration_seconds")
         assert count >= 1
 
 
 class TestSerdeDecodeMetrics:
     """Decode (deserialize) duration + bytes counters."""
 
-    def test_decode_duration_recorded_on_start_end_pair(
-        self, bus, subscriber
-    ):
-        before = _serde_histogram_count(
-            "lmcache_blend.serde_decode_duration_seconds"
-        )
+    def test_decode_duration_recorded_on_start_end_pair(self, bus, subscriber):
+        before = _serde_histogram_count("lmcache_blend.serde_decode_duration_seconds")
         bus.start()
-        bus.publish(
-            Event(
-                event_type=EventType.CB_SERDE_DECODE_START,
-                session_id="serde-dec-1",
-                timestamp=30.0,
-                metadata={"serde_type": "fp8", "num_objects": 3},
+        try:
+            bus.publish(
+                Event(
+                    event_type=EventType.CB_SERDE_DECODE_START,
+                    session_id="serde-dec-1",
+                    timestamp=30.0,
+                    metadata={"serde_type": "fp8", "num_objects": 3},
+                )
             )
-        )
-        bus.publish(
-            Event(
-                event_type=EventType.CB_SERDE_DECODE_END,
-                session_id="serde-dec-1",
-                timestamp=30.075,
-                metadata={
-                    "serde_type": "fp8",
-                    "num_objects": 3,
-                    "bytes_in": 3072,
-                    "bytes_out": 6144,
-                    "success": True,
-                },
+            bus.publish(
+                Event(
+                    event_type=EventType.CB_SERDE_DECODE_END,
+                    session_id="serde-dec-1",
+                    timestamp=30.075,
+                    metadata={
+                        "serde_type": "fp8",
+                        "num_objects": 3,
+                        "bytes_in": 3072,
+                        "bytes_out": 6144,
+                        "success": True,
+                    },
+                )
             )
-        )
-        time.sleep(_DRAIN_WAIT)
-        bus.stop()
+            time.sleep(_DRAIN_WAIT)
+        finally:
+            bus.stop()
 
-        after = _serde_histogram_count(
-            "lmcache_blend.serde_decode_duration_seconds"
-        )
+        after = _serde_histogram_count("lmcache_blend.serde_decode_duration_seconds")
         assert after - before == 1
 
-    def test_decode_failure_increments_failure_counter(
-        self, bus, subscriber, snapshot
-    ):
+    def test_decode_failure_increments_failure_counter(self, bus, subscriber, snapshot):
         bus.start()
-        bus.publish(
-            Event(
-                event_type=EventType.CB_SERDE_DECODE_START,
-                session_id="serde-dec-fail",
-                timestamp=60.0,
-                metadata={"serde_type": "cachegen", "num_objects": 1},
+        try:
+            bus.publish(
+                Event(
+                    event_type=EventType.CB_SERDE_DECODE_START,
+                    session_id="serde-dec-fail",
+                    timestamp=60.0,
+                    metadata={"serde_type": "cachegen", "num_objects": 1},
+                )
             )
-        )
-        bus.publish(
-            Event(
-                event_type=EventType.CB_SERDE_DECODE_END,
-                session_id="serde-dec-fail",
-                timestamp=60.005,
-                metadata={
-                    "serde_type": "cachegen",
-                    "num_objects": 1,
-                    "bytes_in": 2048,
-                    "bytes_out": 0,
-                    "success": False,
-                    "failure_reason": "corrupt_data",
-                },
+            bus.publish(
+                Event(
+                    event_type=EventType.CB_SERDE_DECODE_END,
+                    session_id="serde-dec-fail",
+                    timestamp=60.005,
+                    metadata={
+                        "serde_type": "cachegen",
+                        "num_objects": 1,
+                        "bytes_in": 2048,
+                        "bytes_out": 0,
+                        "success": False,
+                        "failure_reason": "corrupt_data",
+                    },
+                )
             )
-        )
-        time.sleep(_DRAIN_WAIT)
-        bus.stop()
+            time.sleep(_DRAIN_WAIT)
+        finally:
+            bus.stop()
 
         delta = snapshot()
         assert delta.get("lmcache_blend.serde_failures", 0) >= 1
 
     def test_decode_bytes_counters(self, bus, subscriber, snapshot):
         bus.start()
-        bus.publish(
-            Event(
-                event_type=EventType.CB_SERDE_DECODE_END,
-                session_id="serde-dec-bytes",
-                metadata={
-                    "serde_type": "naive",
-                    "num_objects": 2,
-                    "bytes_in": 2048,
-                    "bytes_out": 4096,
-                    "success": True,
-                },
+        try:
+            bus.publish(
+                Event(
+                    event_type=EventType.CB_SERDE_DECODE_END,
+                    session_id="serde-dec-bytes",
+                    metadata={
+                        "serde_type": "naive",
+                        "num_objects": 2,
+                        "bytes_in": 2048,
+                        "bytes_out": 4096,
+                        "success": True,
+                    },
+                )
             )
-        )
-        time.sleep(_DRAIN_WAIT)
-        bus.stop()
+            time.sleep(_DRAIN_WAIT)
+        finally:
+            bus.stop()
 
         delta = snapshot()
         assert delta.get("lmcache_blend.serde_bytes_in", 0) >= 2048
@@ -447,23 +439,25 @@ class TestSerdeCompressionRatio:
 
     def test_encode_fp8_compression_ratio(self, bus, subscriber, snapshot):
         bus.start()
-        # 3 encode operations with same serde_type
-        for i in range(3):
-            bus.publish(
-                Event(
-                    event_type=EventType.CB_SERDE_ENCODE_END,
-                    session_id=f"serde-ratio-{i}",
-                    metadata={
-                        "serde_type": "fp8",
-                        "num_objects": 1,
-                        "bytes_in": 8192,
-                        "bytes_out": 4096,
-                        "success": True,
-                    },
+        try:
+            # 3 encode operations with same serde_type
+            for i in range(3):
+                bus.publish(
+                    Event(
+                        event_type=EventType.CB_SERDE_ENCODE_END,
+                        session_id=f"serde-ratio-{i}",
+                        metadata={
+                            "serde_type": "fp8",
+                            "num_objects": 1,
+                            "bytes_in": 8192,
+                            "bytes_out": 4096,
+                            "success": True,
+                        },
+                    )
                 )
-            )
-        time.sleep(_DRAIN_WAIT)
-        bus.stop()
+            time.sleep(_DRAIN_WAIT)
+        finally:
+            bus.stop()
 
         delta = snapshot()
         # 3 * 8192 = 24576 bytes in
@@ -475,28 +469,28 @@ class TestSerdeCompressionRatio:
 class TestSerdeEndOnlyStillRecords:
     """END events without matching START should still record counters."""
 
-    def test_encode_end_without_start_records_bytes(
-        self, bus, subscriber, snapshot
-    ):
+    def test_encode_end_without_start_records_bytes(self, bus, subscriber, snapshot):
         """Stand-alone END event (e.g. from a crashed mid-encode path)
         should still record byte counters but skip duration."""
         bus.start()
-        bus.publish(
-            Event(
-                event_type=EventType.CB_SERDE_ENCODE_END,
-                session_id="serde-orphan",
-                timestamp=100.5,
-                metadata={
-                    "serde_type": "naive",
-                    "num_objects": 1,
-                    "bytes_in": 512,
-                    "bytes_out": 512,
-                    "success": True,
-                },
+        try:
+            bus.publish(
+                Event(
+                    event_type=EventType.CB_SERDE_ENCODE_END,
+                    session_id="serde-orphan",
+                    timestamp=100.5,
+                    metadata={
+                        "serde_type": "naive",
+                        "num_objects": 1,
+                        "bytes_in": 512,
+                        "bytes_out": 512,
+                        "success": True,
+                    },
+                )
             )
-        )
-        time.sleep(_DRAIN_WAIT)
-        bus.stop()
+            time.sleep(_DRAIN_WAIT)
+        finally:
+            bus.stop()
 
         delta = snapshot()
         assert delta.get("lmcache_blend.serde_bytes_in", 0) >= 512
@@ -506,40 +500,40 @@ class TestSerdeEndOnlyStillRecords:
 class TestSerdeMultipleTypes:
     """Serde type attribute distinguishes fp8/naive/cachegen/kivi."""
 
-    def test_mixed_serde_types_tracked_separately(
-        self, bus, subscriber, snapshot
-    ):
+    def test_mixed_serde_types_tracked_separately(self, bus, subscriber, snapshot):
         bus.start()
-        # fp8 encode
-        bus.publish(
-            Event(
-                event_type=EventType.CB_SERDE_ENCODE_END,
-                session_id="mix-fp8",
-                metadata={
-                    "serde_type": "fp8",
-                    "num_objects": 1,
-                    "bytes_in": 4096,
-                    "bytes_out": 2048,
-                    "success": True,
-                },
+        try:
+            # fp8 encode
+            bus.publish(
+                Event(
+                    event_type=EventType.CB_SERDE_ENCODE_END,
+                    session_id="mix-fp8",
+                    metadata={
+                        "serde_type": "fp8",
+                        "num_objects": 1,
+                        "bytes_in": 4096,
+                        "bytes_out": 2048,
+                        "success": True,
+                    },
+                )
             )
-        )
-        # naive encode
-        bus.publish(
-            Event(
-                event_type=EventType.CB_SERDE_ENCODE_END,
-                session_id="mix-naive",
-                metadata={
-                    "serde_type": "naive",
-                    "num_objects": 1,
-                    "bytes_in": 4096,
-                    "bytes_out": 4096,
-                    "success": True,
-                },
+            # naive encode
+            bus.publish(
+                Event(
+                    event_type=EventType.CB_SERDE_ENCODE_END,
+                    session_id="mix-naive",
+                    metadata={
+                        "serde_type": "naive",
+                        "num_objects": 1,
+                        "bytes_in": 4096,
+                        "bytes_out": 4096,
+                        "success": True,
+                    },
+                )
             )
-        )
-        time.sleep(_DRAIN_WAIT)
-        bus.stop()
+            time.sleep(_DRAIN_WAIT)
+        finally:
+            bus.stop()
 
         # Both should be counted in bytes_in total
         delta = snapshot()
@@ -552,3 +546,42 @@ class TestSerdeMultipleTypes:
         )
         serde_types = {a.get("serde_type") for a in encode_attrs}
         assert "fp8" in serde_types or "naive" in serde_types
+
+
+class TestSerdePendingOpsCap:
+    """Pending serde START events are bounded when END is missing."""
+
+    def test_pending_ops_cap_evicts_oldest_start(self, monkeypatch, subscriber):
+        from lmcache.v1.mp_observability.subscribers.metrics import serde
+
+        monkeypatch.setattr(serde, "_MAX_PENDING_OPS", 2)
+        callbacks = subscriber.get_subscriptions()
+
+        callbacks[EventType.CB_SERDE_ENCODE_START](
+            Event(
+                event_type=EventType.CB_SERDE_ENCODE_START,
+                session_id="one",
+                timestamp=1.0,
+                metadata={"serde_type": "fp8"},
+            )
+        )
+        callbacks[EventType.CB_SERDE_ENCODE_START](
+            Event(
+                event_type=EventType.CB_SERDE_ENCODE_START,
+                session_id="two",
+                timestamp=2.0,
+                metadata={"serde_type": "fp8"},
+            )
+        )
+        callbacks[EventType.CB_SERDE_ENCODE_START](
+            Event(
+                event_type=EventType.CB_SERDE_ENCODE_START,
+                session_id="three",
+                timestamp=3.0,
+                metadata={"serde_type": "fp8"},
+            )
+        )
+
+        assert len(subscriber._pending_ops) == 2
+        assert "encode:one" not in subscriber._pending_ops
+        assert "encode:three" in subscriber._pending_ops

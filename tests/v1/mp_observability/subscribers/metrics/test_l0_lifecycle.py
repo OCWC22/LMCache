@@ -220,7 +220,7 @@ class TestL0NewAllocation:
         ) == 3
 
     def test_block_allocation_counters_export_to_prometheus(self):
-        code = r'''
+        code = r"""
 from dataclasses import dataclass
 import os
 import sys
@@ -260,7 +260,7 @@ for line in generate_latest(REGISTRY).decode().splitlines():
         print(line)
 sys.stdout.flush()
 os._exit(0)
-'''
+"""
         result = subprocess.run(
             [sys.executable, "-c", textwrap.dedent(code)],
             check=True,
@@ -340,15 +340,11 @@ class TestL0PrefixSharing:
         bus.start()
         try:
             bus.publish(
-                _make_allocation_event(
-                    [FakeBlockAllocationRecord("req-A", [6], [99])]
-                )
+                _make_allocation_event([FakeBlockAllocationRecord("req-A", [6], [99])])
             )
             time.sleep(_DRAIN_WAIT)
             bus.publish(
-                _make_allocation_event(
-                    [FakeBlockAllocationRecord("req-B", [6], [99])]
-                )
+                _make_allocation_event([FakeBlockAllocationRecord("req-B", [6], [99])])
             )
             time.sleep(_DRAIN_WAIT)
         finally:
@@ -488,15 +484,11 @@ class TestL0EvictionDetection:
         bus.start()
         try:
             bus.publish(
-                _make_allocation_event(
-                    [FakeBlockAllocationRecord("req-1", [40], [1])]
-                )
+                _make_allocation_event([FakeBlockAllocationRecord("req-1", [40], [1])])
             )
             time.sleep(_DRAIN_WAIT)
             bus.publish(
-                _make_allocation_event(
-                    [FakeBlockAllocationRecord("req-2", [40], [2])]
-                )
+                _make_allocation_event([FakeBlockAllocationRecord("req-2", [40], [2])])
             )
             time.sleep(_DRAIN_WAIT)
         finally:
@@ -587,9 +579,7 @@ class TestL0EdgeCases:
         bus.start()
         try:
             bus.publish(
-                _make_allocation_event(
-                    [FakeBlockAllocationRecord("req-empty", [], [])]
-                )
+                _make_allocation_event([FakeBlockAllocationRecord("req-empty", [], [])])
             )
             time.sleep(_DRAIN_WAIT)
         finally:
@@ -602,17 +592,13 @@ class TestL0EdgeCases:
         bus.start()
         try:
             bus.publish(
-                _make_allocation_event(
-                    [FakeBlockAllocationRecord("req-1", [50], [1])]
-                )
+                _make_allocation_event([FakeBlockAllocationRecord("req-1", [50], [1])])
             )
             time.sleep(_DRAIN_WAIT)
 
             # Same request, same block, same tokens — decode continuation.
             bus.publish(
-                _make_allocation_event(
-                    [FakeBlockAllocationRecord("req-1", [50], [1])]
-                )
+                _make_allocation_event([FakeBlockAllocationRecord("req-1", [50], [1])])
             )
             time.sleep(_DRAIN_WAIT)
         finally:
@@ -769,3 +755,38 @@ class TestL0CounterAttributes:
                         )
                         return
         pytest.fail("No matching data point found for the published event")
+
+
+class TestL0SkippedSetCap:
+    """Skipped block tracking remains bounded under sampling misses."""
+
+    def test_skipped_set_cap_evicts_entry_when_sampling_skips(self, monkeypatch):
+        from lmcache.v1.mp_observability.subscribers.metrics import l0_lifecycle
+        from lmcache.v1.mp_observability.subscribers.metrics.l0_lifecycle import (
+            L0LifecycleSubscriber,
+        )
+
+        monkeypatch.setattr(l0_lifecycle, "_MAX_SKIPPED", 2)
+        monkeypatch.setattr(L0LifecycleSubscriber, "_should_sample", lambda self: False)
+        subscriber = L0LifecycleSubscriber(sample_rate=1.0)
+        callback = subscriber.get_subscriptions()[EventType.MP_VLLM_BLOCK_ALLOCATION]
+
+        for block_id in (1, 2, 3):
+            callback(
+                Event(
+                    event_type=EventType.MP_VLLM_BLOCK_ALLOCATION,
+                    metadata={
+                        "instance_id": 0,
+                        "model_name": "model",
+                        "records": [
+                            FakeBlockAllocationRecord(
+                                req_id=f"req-{block_id}",
+                                new_block_ids=[block_id],
+                                new_token_ids=[block_id],
+                            )
+                        ],
+                    },
+                )
+            )
+
+        assert len(subscriber._skipped) == 2

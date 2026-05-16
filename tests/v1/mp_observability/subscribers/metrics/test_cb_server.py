@@ -129,178 +129,198 @@ class TestBlendMetricsSubscriber:
 
     def test_lookup_start_increments_counter(self, bus, subscriber):
         bus.start()
-        bus.publish(
-            Event(
-                event_type=EventType.CB_LOOKUP_START,
-                session_id="req-1",
-                metadata={"num_tokens": 128},
-            )
-        )
-        time.sleep(0.15)
-        bus.stop()
-
-    def test_lookup_end_normal(self, bus, subscriber):
-        bus.start()
-        bus.publish(
-            Event(
-                event_type=EventType.CB_LOOKUP_END,
-                session_id="req-1",
-                metadata={
-                    "requested_tokens": 1024,
-                    "hit_tokens": 768,
-                    "fingerprint_hits": 4,
-                    "storage_hits": 3,
-                    "stale_chunks": 1,
-                    "no_gpu_context": False,
-                },
-            )
-        )
-        time.sleep(0.15)
-        bus.stop()
-
-    def test_lookup_end_no_gpu_context_flag(self, bus, subscriber):
-        bus.start()
-        bus.publish(
-            Event(
-                event_type=EventType.CB_LOOKUP_END,
-                session_id="req-1",
-                metadata={
-                    "requested_tokens": 0,
-                    "hit_tokens": 0,
-                    "fingerprint_hits": 0,
-                    "storage_hits": 0,
-                    "stale_chunks": 0,
-                    "no_gpu_context": True,
-                },
-            )
-        )
-        time.sleep(0.15)
-        bus.stop()
-
-    def test_retrieve_success(self, bus, subscriber):
-        bus.start()
-        bus.publish(
-            Event(
-                event_type=EventType.CB_RETRIEVE_START,
-                session_id="req-2",
-                metadata={"instance_id": 0, "num_chunks": 3},
-            )
-        )
-        bus.publish(
-            Event(
-                event_type=EventType.CB_RETRIEVE_END,
-                session_id="req-2",
-                metadata={"instance_id": 0, "num_chunks": 3, "success": True},
-            )
-        )
-        time.sleep(0.15)
-        bus.stop()
-
-    def test_retrieve_failure_counted(self, bus, subscriber):
-        bus.start()
-        bus.publish(
-            Event(
-                event_type=EventType.CB_RETRIEVE_START,
-                session_id="req-2",
-                metadata={"instance_id": 0, "num_chunks": 2},
-            )
-        )
-        bus.publish(
-            Event(
-                event_type=EventType.CB_RETRIEVE_END,
-                session_id="req-2",
-                metadata={"instance_id": 0, "num_chunks": 2, "success": False},
-            )
-        )
-        time.sleep(0.15)
-        bus.stop()
-
-    def test_store_pre_computed_failure_counted(self, bus, subscriber):
-        bus.start()
-        bus.publish(
-            Event(
-                event_type=EventType.CB_STORE_PRE_COMPUTED_START,
-                session_id="req-3",
-                metadata={"instance_id": 0, "num_tokens": 64},
-            )
-        )
-        bus.publish(
-            Event(
-                event_type=EventType.CB_STORE_PRE_COMPUTED_END,
-                session_id="req-3",
-                metadata={"instance_id": 0, "stored_chunks": 0, "success": False},
-            )
-        )
-        time.sleep(0.15)
-        bus.stop()
-
-    def test_store_final_failure_counted(self, bus, subscriber):
-        bus.start()
-        bus.publish(
-            Event(
-                event_type=EventType.CB_STORE_FINAL_START,
-                session_id="req-4",
-                metadata={"instance_id": 1, "num_tokens": 256},
-            )
-        )
-        bus.publish(
-            Event(
-                event_type=EventType.CB_STORE_FINAL_END,
-                session_id="req-4",
-                metadata={"instance_id": 1, "stored_chunks": 0, "success": False},
-            )
-        )
-        time.sleep(0.15)
-        bus.stop()
-
-    def test_fingerprints_registered(self, bus, subscriber):
-        bus.start()
-        bus.publish(
-            Event(
-                event_type=EventType.CB_FINGERPRINTS_REGISTERED,
-                metadata={"num_chunks": 8},
-            )
-        )
-        time.sleep(0.15)
-        bus.stop()
-
-    def test_chunks_evicted(self, bus, subscriber):
-        bus.start()
-        bus.publish(
-            Event(
-                event_type=EventType.CB_CHUNKS_EVICTED,
-                metadata={"num_chunks": 3},
-            )
-        )
-        time.sleep(0.15)
-        bus.stop()
-
-    def test_multiple_events_accumulate(self, bus, subscriber):
-        bus.start()
-        for _ in range(5):
+        try:
             bus.publish(
                 Event(
                     event_type=EventType.CB_LOOKUP_START,
-                    session_id="req-bulk",
-                    metadata={"num_tokens": 100},
+                    session_id="req-1",
+                    metadata={"num_tokens": 128},
                 )
             )
+            time.sleep(0.15)
+        finally:
+            bus.stop()
+
+    def test_lookup_end_normal(self, bus, subscriber):
+        bus.start()
+        try:
             bus.publish(
                 Event(
                     event_type=EventType.CB_LOOKUP_END,
-                    session_id="req-bulk",
+                    session_id="req-1",
                     metadata={
-                        "requested_tokens": 96,
-                        "hit_tokens": 32,
-                        "fingerprint_hits": 2,
-                        "storage_hits": 1,
+                        "requested_tokens": 1024,
+                        "hit_tokens": 768,
+                        "fingerprint_hits": 4,
+                        "storage_hits": 3,
                         "stale_chunks": 1,
                         "no_gpu_context": False,
                     },
                 )
             )
-        time.sleep(0.15)
-        bus.stop()
+            time.sleep(0.15)
+        finally:
+            bus.stop()
+
+    def test_lookup_end_no_gpu_context_flag(self, bus, subscriber):
+        bus.start()
+        try:
+            bus.publish(
+                Event(
+                    event_type=EventType.CB_LOOKUP_END,
+                    session_id="req-1",
+                    metadata={
+                        "requested_tokens": 0,
+                        "hit_tokens": 0,
+                        "fingerprint_hits": 0,
+                        "storage_hits": 0,
+                        "stale_chunks": 0,
+                        "no_gpu_context": True,
+                    },
+                )
+            )
+            time.sleep(0.15)
+        finally:
+            bus.stop()
+
+    def test_retrieve_success(self, bus, subscriber):
+        bus.start()
+        try:
+            bus.publish(
+                Event(
+                    event_type=EventType.CB_RETRIEVE_START,
+                    session_id="req-2",
+                    metadata={"instance_id": 0, "num_chunks": 3},
+                )
+            )
+            bus.publish(
+                Event(
+                    event_type=EventType.CB_RETRIEVE_END,
+                    session_id="req-2",
+                    metadata={"instance_id": 0, "num_chunks": 3, "success": True},
+                )
+            )
+            time.sleep(0.15)
+        finally:
+            bus.stop()
+
+    def test_retrieve_failure_counted(self, bus, subscriber):
+        bus.start()
+        try:
+            bus.publish(
+                Event(
+                    event_type=EventType.CB_RETRIEVE_START,
+                    session_id="req-2",
+                    metadata={"instance_id": 0, "num_chunks": 2},
+                )
+            )
+            bus.publish(
+                Event(
+                    event_type=EventType.CB_RETRIEVE_END,
+                    session_id="req-2",
+                    metadata={"instance_id": 0, "num_chunks": 2, "success": False},
+                )
+            )
+            time.sleep(0.15)
+        finally:
+            bus.stop()
+
+    def test_store_pre_computed_failure_counted(self, bus, subscriber):
+        bus.start()
+        try:
+            bus.publish(
+                Event(
+                    event_type=EventType.CB_STORE_PRE_COMPUTED_START,
+                    session_id="req-3",
+                    metadata={"instance_id": 0, "num_tokens": 64},
+                )
+            )
+            bus.publish(
+                Event(
+                    event_type=EventType.CB_STORE_PRE_COMPUTED_END,
+                    session_id="req-3",
+                    metadata={"instance_id": 0, "stored_chunks": 0, "success": False},
+                )
+            )
+            time.sleep(0.15)
+        finally:
+            bus.stop()
+
+    def test_store_final_failure_counted(self, bus, subscriber):
+        bus.start()
+        try:
+            bus.publish(
+                Event(
+                    event_type=EventType.CB_STORE_FINAL_START,
+                    session_id="req-4",
+                    metadata={"instance_id": 1, "num_tokens": 256},
+                )
+            )
+            bus.publish(
+                Event(
+                    event_type=EventType.CB_STORE_FINAL_END,
+                    session_id="req-4",
+                    metadata={"instance_id": 1, "stored_chunks": 0, "success": False},
+                )
+            )
+            time.sleep(0.15)
+        finally:
+            bus.stop()
+
+    def test_fingerprints_registered(self, bus, subscriber):
+        bus.start()
+        try:
+            bus.publish(
+                Event(
+                    event_type=EventType.CB_FINGERPRINTS_REGISTERED,
+                    metadata={"num_chunks": 8},
+                )
+            )
+            time.sleep(0.15)
+        finally:
+            bus.stop()
+
+    def test_chunks_evicted(self, bus, subscriber):
+        bus.start()
+        try:
+            bus.publish(
+                Event(
+                    event_type=EventType.CB_CHUNKS_EVICTED,
+                    metadata={"num_chunks": 3},
+                )
+            )
+            time.sleep(0.15)
+        finally:
+            bus.stop()
+
+    def test_multiple_events_accumulate(self, bus, subscriber):
+        bus.start()
+        try:
+            for _ in range(5):
+                bus.publish(
+                    Event(
+                        event_type=EventType.CB_LOOKUP_START,
+                        session_id="req-bulk",
+                        metadata={"num_tokens": 100},
+                    )
+                )
+                bus.publish(
+                    Event(
+                        event_type=EventType.CB_LOOKUP_END,
+                        session_id="req-bulk",
+                        metadata={
+                            "requested_tokens": 96,
+                            "hit_tokens": 32,
+                            "fingerprint_hits": 2,
+                            "storage_hits": 1,
+                            "stale_chunks": 1,
+                            "no_gpu_context": False,
+                        },
+                    )
+                )
+            time.sleep(0.15)
+        finally:
+            bus.stop()
 
 
 # ---------------------------------------------------------------------------
@@ -320,22 +340,24 @@ class TestBlendLookupHitTokenCounters:
     def test_full_hit(self, bus, subscriber, snapshot):
         """All requested tokens are served by blend."""
         bus.start()
-        bus.publish(
-            Event(
-                event_type=EventType.CB_LOOKUP_END,
-                session_id="req-1",
-                metadata={
-                    "requested_tokens": 1024,
-                    "hit_tokens": 1024,
-                    "fingerprint_hits": 4,
-                    "storage_hits": 4,
-                    "stale_chunks": 0,
-                    "no_gpu_context": False,
-                },
+        try:
+            bus.publish(
+                Event(
+                    event_type=EventType.CB_LOOKUP_END,
+                    session_id="req-1",
+                    metadata={
+                        "requested_tokens": 1024,
+                        "hit_tokens": 1024,
+                        "fingerprint_hits": 4,
+                        "storage_hits": 4,
+                        "stale_chunks": 0,
+                        "no_gpu_context": False,
+                    },
+                )
             )
-        )
-        time.sleep(_DRAIN_WAIT)
-        bus.stop()
+            time.sleep(_DRAIN_WAIT)
+        finally:
+            bus.stop()
 
         delta = snapshot()
         assert delta["lmcache_blend.lookup_requested_tokens"] == 1024
@@ -344,22 +366,24 @@ class TestBlendLookupHitTokenCounters:
     def test_partial_hit(self, bus, subscriber, snapshot):
         """A subset of the requested tokens is served by blend."""
         bus.start()
-        bus.publish(
-            Event(
-                event_type=EventType.CB_LOOKUP_END,
-                session_id="req-2",
-                metadata={
-                    "requested_tokens": 1024,
-                    "hit_tokens": 256,
-                    "fingerprint_hits": 4,
-                    "storage_hits": 1,
-                    "stale_chunks": 3,
-                    "no_gpu_context": False,
-                },
+        try:
+            bus.publish(
+                Event(
+                    event_type=EventType.CB_LOOKUP_END,
+                    session_id="req-2",
+                    metadata={
+                        "requested_tokens": 1024,
+                        "hit_tokens": 256,
+                        "fingerprint_hits": 4,
+                        "storage_hits": 1,
+                        "stale_chunks": 3,
+                        "no_gpu_context": False,
+                    },
+                )
             )
-        )
-        time.sleep(_DRAIN_WAIT)
-        bus.stop()
+            time.sleep(_DRAIN_WAIT)
+        finally:
+            bus.stop()
 
         delta = snapshot()
         assert delta["lmcache_blend.lookup_requested_tokens"] == 1024
@@ -369,22 +393,24 @@ class TestBlendLookupHitTokenCounters:
         """Cold lookup: the request must still increment the denominator so
         the running hit rate properly reflects the miss."""
         bus.start()
-        bus.publish(
-            Event(
-                event_type=EventType.CB_LOOKUP_END,
-                session_id="req-3",
-                metadata={
-                    "requested_tokens": 512,
-                    "hit_tokens": 0,
-                    "fingerprint_hits": 0,
-                    "storage_hits": 0,
-                    "stale_chunks": 0,
-                    "no_gpu_context": False,
-                },
+        try:
+            bus.publish(
+                Event(
+                    event_type=EventType.CB_LOOKUP_END,
+                    session_id="req-3",
+                    metadata={
+                        "requested_tokens": 512,
+                        "hit_tokens": 0,
+                        "fingerprint_hits": 0,
+                        "storage_hits": 0,
+                        "stale_chunks": 0,
+                        "no_gpu_context": False,
+                    },
+                )
             )
-        )
-        time.sleep(_DRAIN_WAIT)
-        bus.stop()
+            time.sleep(_DRAIN_WAIT)
+        finally:
+            bus.stop()
 
         delta = snapshot()
         assert delta["lmcache_blend.lookup_requested_tokens"] == 512
@@ -395,22 +421,24 @@ class TestBlendLookupHitTokenCounters:
         ``requested_tokens=0`` — neither counter should move so the ratio
         stays meaningful."""
         bus.start()
-        bus.publish(
-            Event(
-                event_type=EventType.CB_LOOKUP_END,
-                session_id="req-4",
-                metadata={
-                    "requested_tokens": 0,
-                    "hit_tokens": 0,
-                    "fingerprint_hits": 5,
-                    "storage_hits": 0,
-                    "stale_chunks": 0,
-                    "no_gpu_context": True,
-                },
+        try:
+            bus.publish(
+                Event(
+                    event_type=EventType.CB_LOOKUP_END,
+                    session_id="req-4",
+                    metadata={
+                        "requested_tokens": 0,
+                        "hit_tokens": 0,
+                        "fingerprint_hits": 5,
+                        "storage_hits": 0,
+                        "stale_chunks": 0,
+                        "no_gpu_context": True,
+                    },
+                )
             )
-        )
-        time.sleep(_DRAIN_WAIT)
-        bus.stop()
+            time.sleep(_DRAIN_WAIT)
+        finally:
+            bus.stop()
 
         delta = snapshot()
         assert delta.get("lmcache_blend.lookup_requested_tokens", 0) == 0
@@ -419,40 +447,42 @@ class TestBlendLookupHitTokenCounters:
     def test_multiple_lookups_accumulate(self, bus, subscriber, snapshot):
         """Counters accumulate across multiple completed lookups."""
         bus.start()
-        # 3 full-hit lookups @ 256 tokens each
-        for i in range(3):
-            bus.publish(
-                Event(
-                    event_type=EventType.CB_LOOKUP_END,
-                    session_id=f"hit-{i}",
-                    metadata={
-                        "requested_tokens": 256,
-                        "hit_tokens": 256,
-                        "fingerprint_hits": 1,
-                        "storage_hits": 1,
-                        "stale_chunks": 0,
-                        "no_gpu_context": False,
-                    },
+        try:
+            # 3 full-hit lookups @ 256 tokens each
+            for i in range(3):
+                bus.publish(
+                    Event(
+                        event_type=EventType.CB_LOOKUP_END,
+                        session_id=f"hit-{i}",
+                        metadata={
+                            "requested_tokens": 256,
+                            "hit_tokens": 256,
+                            "fingerprint_hits": 1,
+                            "storage_hits": 1,
+                            "stale_chunks": 0,
+                            "no_gpu_context": False,
+                        },
+                    )
                 )
-            )
-        # 2 partial-hit lookups: 1024 requested, 128 hit
-        for i in range(2):
-            bus.publish(
-                Event(
-                    event_type=EventType.CB_LOOKUP_END,
-                    session_id=f"partial-{i}",
-                    metadata={
-                        "requested_tokens": 1024,
-                        "hit_tokens": 128,
-                        "fingerprint_hits": 4,
-                        "storage_hits": 1,
-                        "stale_chunks": 3,
-                        "no_gpu_context": False,
-                    },
+            # 2 partial-hit lookups: 1024 requested, 128 hit
+            for i in range(2):
+                bus.publish(
+                    Event(
+                        event_type=EventType.CB_LOOKUP_END,
+                        session_id=f"partial-{i}",
+                        metadata={
+                            "requested_tokens": 1024,
+                            "hit_tokens": 128,
+                            "fingerprint_hits": 4,
+                            "storage_hits": 1,
+                            "stale_chunks": 3,
+                            "no_gpu_context": False,
+                        },
+                    )
                 )
-            )
-        time.sleep(_DRAIN_WAIT)
-        bus.stop()
+            time.sleep(_DRAIN_WAIT)
+        finally:
+            bus.stop()
 
         delta = snapshot()
         # 3*256 + 2*1024 = 768 + 2048 = 2816
@@ -469,29 +499,31 @@ class TestBlendL0GpuObservability:
             "lmcache_blend.l0_gpu_operation_duration_seconds"
         )
         bus.start()
-        bus.publish(
-            Event(
-                event_type=EventType.CB_STORE_PRE_COMPUTED_START,
-                session_id="req-store-pre",
-                timestamp=100.0,
-                metadata={"instance_id": 7, "num_tokens": 512},
+        try:
+            bus.publish(
+                Event(
+                    event_type=EventType.CB_STORE_PRE_COMPUTED_START,
+                    session_id="req-store-pre",
+                    timestamp=100.0,
+                    metadata={"instance_id": 7, "num_tokens": 512},
+                )
             )
-        )
-        bus.publish(
-            Event(
-                event_type=EventType.CB_STORE_PRE_COMPUTED_END,
-                session_id="req-store-pre",
-                timestamp=100.125,
-                metadata={
-                    "instance_id": 7,
-                    "num_tokens": 512,
-                    "stored_chunks": 2,
-                    "success": True,
-                },
+            bus.publish(
+                Event(
+                    event_type=EventType.CB_STORE_PRE_COMPUTED_END,
+                    session_id="req-store-pre",
+                    timestamp=100.125,
+                    metadata={
+                        "instance_id": 7,
+                        "num_tokens": 512,
+                        "stored_chunks": 2,
+                        "success": True,
+                    },
+                )
             )
-        )
-        time.sleep(_DRAIN_WAIT)
-        bus.stop()
+            time.sleep(_DRAIN_WAIT)
+        finally:
+            bus.stop()
 
         assert (
             _histogram_count("lmcache_blend.l0_gpu_operation_duration_seconds")
@@ -522,49 +554,45 @@ class TestBlendL0GpuObservability:
             >= 512
         )
 
-    def test_store_pre_computed_duration_includes_direction_attr(
-        self, bus, subscriber
-    ):
+    def test_store_pre_computed_duration_includes_direction_attr(self, bus, subscriber):
         """The duration histogram MUST include ``direction`` per METRICS.md."""
         bus.start()
-        bus.publish(
-            Event(
-                event_type=EventType.CB_STORE_PRE_COMPUTED_START,
-                session_id="req-dir-check",
-                timestamp=300.0,
-                metadata={"instance_id": 5, "num_tokens": 256},
+        try:
+            bus.publish(
+                Event(
+                    event_type=EventType.CB_STORE_PRE_COMPUTED_START,
+                    session_id="req-dir-check",
+                    timestamp=300.0,
+                    metadata={"instance_id": 5, "num_tokens": 256},
+                )
             )
-        )
-        bus.publish(
-            Event(
-                event_type=EventType.CB_STORE_PRE_COMPUTED_END,
-                session_id="req-dir-check",
-                timestamp=300.05,
-                metadata={
-                    "instance_id": 5,
-                    "num_tokens": 256,
-                    "stored_chunks": 1,
-                    "success": True,
-                },
+            bus.publish(
+                Event(
+                    event_type=EventType.CB_STORE_PRE_COMPUTED_END,
+                    session_id="req-dir-check",
+                    timestamp=300.05,
+                    metadata={
+                        "instance_id": 5,
+                        "num_tokens": 256,
+                        "stored_chunks": 1,
+                        "success": True,
+                    },
+                )
             )
-        )
-        time.sleep(_DRAIN_WAIT)
-        bus.stop()
+            time.sleep(_DRAIN_WAIT)
+        finally:
+            bus.stop()
 
-        attrs_list = _histogram_attrs(
-            "lmcache_blend.l0_gpu_operation_duration_seconds"
-        )
+        attrs_list = _histogram_attrs("lmcache_blend.l0_gpu_operation_duration_seconds")
         assert len(attrs_list) >= 1, "Expected at least one duration data point"
         # The store_pre_computed operation has direction "gpu_to_l1"
         matching = [
             a
             for a in attrs_list
-            if a.get("operation") == "store_pre_computed"
-            and a.get("instance_id") == 5
+            if a.get("operation") == "store_pre_computed" and a.get("instance_id") == 5
         ]
         assert len(matching) >= 1, (
-            f"No duration point for store_pre_computed/instance_id=5; "
-            f"got {attrs_list}"
+            f"No duration point for store_pre_computed/instance_id=5; got {attrs_list}"
         )
         assert matching[0]["direction"] == "gpu_to_l1", (
             f"Expected direction='gpu_to_l1', got attrs={matching[0]}"
@@ -577,29 +605,31 @@ class TestBlendL0GpuObservability:
             "lmcache_blend.l0_gpu_operation_duration_seconds"
         )
         bus.start()
-        bus.publish(
-            Event(
-                event_type=EventType.CB_RETRIEVE_START,
-                session_id="req-retrieve",
-                timestamp=200.0,
-                metadata={"instance_id": 3, "num_chunks": 4, "num_tokens": 1024},
+        try:
+            bus.publish(
+                Event(
+                    event_type=EventType.CB_RETRIEVE_START,
+                    session_id="req-retrieve",
+                    timestamp=200.0,
+                    metadata={"instance_id": 3, "num_chunks": 4, "num_tokens": 1024},
+                )
             )
-        )
-        bus.publish(
-            Event(
-                event_type=EventType.CB_RETRIEVE_END,
-                session_id="req-retrieve",
-                timestamp=200.250,
-                metadata={
-                    "instance_id": 3,
-                    "num_chunks": 4,
-                    "num_tokens": 1024,
-                    "success": False,
-                },
+            bus.publish(
+                Event(
+                    event_type=EventType.CB_RETRIEVE_END,
+                    session_id="req-retrieve",
+                    timestamp=200.250,
+                    metadata={
+                        "instance_id": 3,
+                        "num_chunks": 4,
+                        "num_tokens": 1024,
+                        "success": False,
+                    },
+                )
             )
-        )
-        time.sleep(_DRAIN_WAIT)
-        bus.stop()
+            time.sleep(_DRAIN_WAIT)
+        finally:
+            bus.stop()
 
         assert (
             _histogram_count("lmcache_blend.l0_gpu_operation_duration_seconds")
@@ -622,7 +652,7 @@ class TestBlendL0GpuObservability:
         )
 
     def test_cb_l0_metrics_export_to_prometheus(self):
-        code = r'''
+        code = r"""
 import os
 import sys
 import time
@@ -643,33 +673,35 @@ metrics.set_meter_provider(MeterProvider(metric_readers=[reader]))
 bus = EventBus(EventBusConfig(enabled=True, max_queue_size=100))
 bus.register_subscriber(BlendMetricsSubscriber())
 bus.start()
-bus.publish(Event(
-    event_type=EventType.CB_RETRIEVE_START,
-    session_id="req-prometheus",
-    metadata={"instance_id": 11, "num_chunks": 5, "num_tokens": 1280},
-))
-bus.publish(Event(
-    event_type=EventType.CB_RETRIEVE_END,
-    session_id="req-prometheus",
-    metadata={
-        "instance_id": 11,
-        "num_chunks": 5,
-        "num_tokens": 1280,
-        "success": True,
-        "token_ids": [101, 102],
-        "block_ids": [7, 8],
-        "hashes": ["secret-hash"],
-        "object_keys": ["secret-key"],
-    },
-))
-time.sleep(0.2)
-bus.stop()
+try:
+    bus.publish(Event(
+        event_type=EventType.CB_RETRIEVE_START,
+        session_id="req-prometheus",
+        metadata={"instance_id": 11, "num_chunks": 5, "num_tokens": 1280},
+    ))
+    bus.publish(Event(
+        event_type=EventType.CB_RETRIEVE_END,
+        session_id="req-prometheus",
+        metadata={
+            "instance_id": 11,
+            "num_chunks": 5,
+            "num_tokens": 1280,
+            "success": True,
+            "token_ids": [101, 102],
+            "block_ids": [7, 8],
+            "hashes": ["secret-hash"],
+            "object_keys": ["secret-key"],
+        },
+    ))
+    time.sleep(0.2)
+finally:
+    bus.stop()
 for line in generate_latest(REGISTRY).decode().splitlines():
     if "lmcache_blend_l0_gpu" in line:
         print(line)
 sys.stdout.flush()
 os._exit(0)
-'''
+"""
         result = subprocess.run(
             [sys.executable, "-c", textwrap.dedent(code)],
             check=True,
@@ -756,3 +788,30 @@ os._exit(0)
         assert "secret-hash" not in redacted
         assert "block_ids" not in redacted
         assert "secret-key" not in redacted
+
+
+class TestBlendPendingOpsCap:
+    """Pending CB L0 GPU START events are bounded when END is missing."""
+
+    def test_pending_l0_gpu_ops_cap_evicts_oldest_start(self, monkeypatch, subscriber):
+        from lmcache.v1.mp_observability.subscribers.metrics import cb_server
+
+        monkeypatch.setattr(cb_server, "_MAX_PENDING_L0_GPU_OPS", 2)
+        callbacks = subscriber.get_subscriptions()
+
+        for session_id, timestamp in (("one", 1.0), ("two", 2.0), ("three", 3.0)):
+            callbacks[EventType.CB_RETRIEVE_START](
+                Event(
+                    event_type=EventType.CB_RETRIEVE_START,
+                    session_id=session_id,
+                    timestamp=timestamp,
+                    metadata={"instance_id": "inst", "num_chunks": 1, "num_tokens": 16},
+                )
+            )
+
+        assert len(subscriber._pending_l0_gpu_ops) == 2
+        assert (
+            "one",
+            EventType.CB_RETRIEVE_START,
+        ) not in subscriber._pending_l0_gpu_ops
+        assert "three:cb.retrieve.start" in subscriber._pending_l0_gpu_ops

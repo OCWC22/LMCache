@@ -29,6 +29,7 @@ which should be < 1 for fp8/cachegen and = 1 for naive.
 from __future__ import annotations
 
 # Standard
+import logging
 from dataclasses import dataclass
 
 # Third Party
@@ -37,6 +38,10 @@ from opentelemetry import metrics
 # First Party
 from lmcache.v1.mp_observability.event import Event, EventType
 from lmcache.v1.mp_observability.event_bus import EventCallback, EventSubscriber
+
+logger = logging.getLogger(__name__)
+
+_MAX_PENDING_OPS = 10_000
 
 
 @dataclass
@@ -111,12 +116,14 @@ class SerdeMetricsSubscriber(EventSubscriber):
     # ------------------------------------------------------------------
 
     def _on_encode_start(self, event: Event) -> None:
-        self._pending_ops[f"encode:{event.session_id}"] = _PendingSerdeOp(
+        key = f"encode:{event.session_id}"
+        self._pending_ops[key] = _PendingSerdeOp(
             direction="encode",
             serde_type=event.metadata.get("serde_type", "unknown"),
             start_timestamp=event.timestamp,
             num_objects=event.metadata.get("num_objects", 1),
         )
+        self._cap_pending_ops()
 
     def _on_encode_end(self, event: Event) -> None:
         serde_type = event.metadata.get("serde_type", "unknown")
@@ -163,12 +170,14 @@ class SerdeMetricsSubscriber(EventSubscriber):
     # ------------------------------------------------------------------
 
     def _on_decode_start(self, event: Event) -> None:
-        self._pending_ops[f"decode:{event.session_id}"] = _PendingSerdeOp(
+        key = f"decode:{event.session_id}"
+        self._pending_ops[key] = _PendingSerdeOp(
             direction="decode",
             serde_type=event.metadata.get("serde_type", "unknown"),
             start_timestamp=event.timestamp,
             num_objects=event.metadata.get("num_objects", 1),
         )
+        self._cap_pending_ops()
 
     def _on_decode_end(self, event: Event) -> None:
         serde_type = event.metadata.get("serde_type", "unknown")
@@ -208,6 +217,17 @@ class SerdeMetricsSubscriber(EventSubscriber):
                     "direction": "decode",
                     "failure_reason": reason,
                 },
+            )
+
+    def _cap_pending_ops(self) -> None:
+        """Evict oldest entries when _pending_ops exceeds the cap."""
+        while len(self._pending_ops) > _MAX_PENDING_OPS:
+            oldest_key = next(iter(self._pending_ops))
+            del self._pending_ops[oldest_key]
+            logger.warning(
+                "_pending_ops exceeded %d entries; evicted oldest key %s",
+                _MAX_PENDING_OPS,
+                oldest_key,
             )
 
     @staticmethod
