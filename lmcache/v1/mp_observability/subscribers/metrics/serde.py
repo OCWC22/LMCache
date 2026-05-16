@@ -129,6 +129,7 @@ class SerdeMetricsSubscriber(EventSubscriber):
         attrs = {
             "serde_type": serde_type,
             "success": success,
+            "num_objects": self._num_objects(event, pending),
         }
         if pending is not None and event.timestamp >= pending.start_timestamp:
             self._encode_duration.record(
@@ -180,6 +181,7 @@ class SerdeMetricsSubscriber(EventSubscriber):
         attrs = {
             "serde_type": serde_type,
             "success": success,
+            "num_objects": self._num_objects(event, pending),
         }
         if pending is not None and event.timestamp >= pending.start_timestamp:
             self._decode_duration.record(
@@ -207,3 +209,11 @@ class SerdeMetricsSubscriber(EventSubscriber):
                     "failure_reason": reason,
                 },
             )
+
+    @staticmethod
+    def _num_objects(event: Event, pending: _PendingSerdeOp | None) -> int:
+        """Return the object count for duration metric attributes."""
+        value = event.metadata.get("num_objects")
+        if value is None and pending is not None:
+            value = pending.num_objects
+        return int(value or 0)

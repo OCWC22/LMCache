@@ -246,6 +246,44 @@ class TestSerdeEncodeMetrics:
         matching = [a for a in attrs if a.get("serde_type") == "naive"]
         assert len(matching) >= 1
         assert matching[0]["success"] is True
+        assert matching[0]["num_objects"] == 1
+
+    def test_decode_duration_carries_num_objects_attr(self, bus, subscriber):
+        bus.start()
+        bus.publish(
+            Event(
+                event_type=EventType.CB_SERDE_DECODE_START,
+                session_id="serde-dec-objects",
+                timestamp=22.0,
+                metadata={"serde_type": "fp8", "num_objects": 3},
+            )
+        )
+        bus.publish(
+            Event(
+                event_type=EventType.CB_SERDE_DECODE_END,
+                session_id="serde-dec-objects",
+                timestamp=22.1,
+                metadata={
+                    "serde_type": "fp8",
+                    "num_objects": 3,
+                    "bytes_in": 1024,
+                    "bytes_out": 2048,
+                    "success": True,
+                },
+            )
+        )
+        time.sleep(_DRAIN_WAIT)
+        bus.stop()
+
+        attrs = _serde_histogram_attrs(
+            "lmcache_blend.serde_decode_duration_seconds"
+        )
+        matching = [
+            a
+            for a in attrs
+            if a.get("serde_type") == "fp8" and a.get("num_objects") == 3
+        ]
+        assert len(matching) >= 1
 
     def test_encode_bytes_counters(self, bus, subscriber, snapshot):
         bus.start()

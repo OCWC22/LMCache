@@ -23,6 +23,7 @@ from lmcache.v1.distributed.serde import (
     Deserializer,
     Serializer,
 )
+from lmcache.v1.mp_observability.event import Event, EventType
 from lmcache.v1.mp_observability.event_bus import EventBusConfig, init_event_bus
 from lmcache.v1.mp_observability.subscribers.metrics.serde import SerdeMetricsSubscriber
 from lmcache.v1.platform import consume_fd
@@ -153,6 +154,43 @@ def test_estimate_serialized_size_delegates_to_serializer() -> None:
         assert processor.estimate_serialized_size(layout) == 1
     finally:
         processor.close()
+
+
+def test_serde_event_session_ids_are_unique_per_processor() -> None:
+    """Concurrent processors must not collide in start/end correlation keys."""
+    bus = init_event_bus(EventBusConfig(enabled=True, max_queue_size=100))
+    session_ids: list[str] = []
+
+    def _record_session_id(event: Event) -> None:
+        session_ids.append(event.session_id)
+
+    bus.subscribe(EventType.CB_SERDE_ENCODE_START, _record_session_id)
+    processor_a = AsyncSerdeProcessor(
+        _FakeSerializer(), _FakeDeserializer(), serde_type="fp8"
+    )
+    processor_b = AsyncSerdeProcessor(
+        _FakeSerializer(), _FakeDeserializer(), serde_type="fp8"
+    )
+    try:
+        bus.start()
+        task_a = processor_a.submit_serialize(
+            [_SizedObject(4096)], [_SizedObject(2048)]  # type: ignore[list-item]
+        )
+        task_b = processor_b.submit_serialize(
+            [_SizedObject(4096)], [_SizedObject(2048)]  # type: ignore[list-item]
+        )
+        assert _wait_for_fd(processor_a.get_serialize_event_fd()), "fd A never signaled"
+        assert _wait_for_fd(processor_b.get_serialize_event_fd()), "fd B never signaled"
+        assert processor_a.query_serialize_result(task_a) is True
+        assert processor_b.query_serialize_result(task_b) is True
+        time.sleep(0.15)
+        assert len(session_ids) == 2
+        assert len(set(session_ids)) == 2
+    finally:
+        processor_a.close()
+        processor_b.close()
+        bus.stop()
+        init_event_bus(EventBusConfig(enabled=False))
 
 
 def test_serialize_emits_cb_serde_encode_metrics() -> None:

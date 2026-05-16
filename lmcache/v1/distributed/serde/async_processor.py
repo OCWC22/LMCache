@@ -179,7 +179,7 @@ class AsyncSerdeProcessor(SerdeProcessor):
         success = True
         bytes_in = self._sum_object_sizes(src_objs)
         bytes_out = 0
-        event_session_id = f"serde-{task_type.name.lower()}-{task_id}"
+        event_session_id = self._event_session_id(task_type, task_id)
         self._publish_serde_event(
             task_type,
             is_start=True,
@@ -257,6 +257,14 @@ class AsyncSerdeProcessor(SerdeProcessor):
             except Exception:
                 logger.debug("Serde: failed to read MemoryObj size", exc_info=True)
         return total
+
+    def _event_session_id(
+        self,
+        task_type: _TaskType,
+        task_id: SerdeTaskId,
+    ) -> str:
+        """Return a process-local unique session id for serde start/end events."""
+        return f"serde-{id(self):x}-{task_type.name.lower()}-{task_id}"
 
     def _publish_serde_event(
         self,
