@@ -6,6 +6,7 @@
 from __future__ import annotations
 
 # Standard
+import logging
 from dataclasses import dataclass
 
 # Third Party
@@ -17,6 +18,10 @@ from lmcache.v1.mp_observability.event_bus import EventCallback, EventSubscriber
 from lmcache.v1.mp_observability.l0_boundary_evidence import (
     append_cb_l0_boundary_event,
 )
+
+logger = logging.getLogger(__name__)
+
+_MAX_PENDING_L0_GPU_OPS = 10_000
 
 
 @dataclass
@@ -261,7 +266,6 @@ class BlendMetricsSubscriber(EventSubscriber):
         if not event.metadata.get("success", True):
             self._store_final_failures.add(1)
 
-
     def _pending_key(self, event: Event, start_type: EventType) -> str:
         return f"{event.session_id}:{start_type.value}"
 
@@ -282,16 +286,16 @@ class BlendMetricsSubscriber(EventSubscriber):
         operation, direction = self._START_TO_OPERATION[event.event_type]
         instance_id = event.metadata.get("instance_id", "")
         start_type = event.event_type
-        self._pending_l0_gpu_ops[self._pending_key(event, start_type)] = (
-            _PendingL0GpuOperation(
-                operation=operation,
-                direction=direction,
-                start_timestamp=event.timestamp,
-                instance_id=instance_id,
-                num_chunks=event.metadata.get("num_chunks"),
-                num_tokens=event.metadata.get("num_tokens"),
-            )
+        key = self._pending_key(event, start_type)
+        self._pending_l0_gpu_ops[key] = _PendingL0GpuOperation(
+            operation=operation,
+            direction=direction,
+            start_timestamp=event.timestamp,
+            instance_id=instance_id,
+            num_chunks=event.metadata.get("num_chunks"),
+            num_tokens=event.metadata.get("num_tokens"),
         )
+        self._cap_pending_l0_gpu_ops()
         append_cb_l0_boundary_event(
             source="lmcache_blend_server_v2",
             stage=self._START_TO_STAGE[event.event_type],
@@ -348,22 +352,29 @@ class BlendMetricsSubscriber(EventSubscriber):
         )
 
     @staticmethod
-    def _num_chunks_moved(
-        event: Event, pending: _PendingL0GpuOperation | None
-    ) -> int:
+    def _num_chunks_moved(event: Event, pending: _PendingL0GpuOperation | None) -> int:
         value = event.metadata.get("stored_chunks", event.metadata.get("num_chunks"))
         if value is None and pending is not None:
             value = pending.num_chunks
         return int(value or 0)
 
     @staticmethod
-    def _num_tokens_moved(
-        event: Event, pending: _PendingL0GpuOperation | None
-    ) -> int:
+    def _num_tokens_moved(event: Event, pending: _PendingL0GpuOperation | None) -> int:
         value = event.metadata.get("num_tokens")
         if value is None and pending is not None:
             value = pending.num_tokens
         return int(value or 0)
+
+    def _cap_pending_l0_gpu_ops(self) -> None:
+        """Evict oldest entries when _pending_l0_gpu_ops exceeds the cap."""
+        while len(self._pending_l0_gpu_ops) > _MAX_PENDING_L0_GPU_OPS:
+            oldest_key = next(iter(self._pending_l0_gpu_ops))
+            del self._pending_l0_gpu_ops[oldest_key]
+            logger.warning(
+                "_pending_l0_gpu_ops exceeded %d entries; evicted oldest key %s",
+                _MAX_PENDING_L0_GPU_OPS,
+                oldest_key,
+            )
 
     def _on_fingerprints_registered(self, event: Event) -> None:
         self._fingerprints_registered.add(event.metadata["num_chunks"])

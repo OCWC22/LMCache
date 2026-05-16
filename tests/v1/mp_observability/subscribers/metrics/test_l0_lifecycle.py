@@ -194,18 +194,20 @@ class TestL0NewAllocation:
     def test_block_allocation_updates_l0_block_counters(self, bus, subscriber):
         before = _read_counter_values()
         bus.start()
-        bus.publish(
-            _make_allocation_event(
-                [
-                    FakeBlockAllocationRecord("req-1", [0, 1], [10, 20]),
-                    FakeBlockAllocationRecord("req-2", [2], [30]),
-                ],
-                instance_id=42,
-                model_name="llama-7b",
+        try:
+            bus.publish(
+                _make_allocation_event(
+                    [
+                        FakeBlockAllocationRecord("req-1", [0, 1], [10, 20]),
+                        FakeBlockAllocationRecord("req-2", [2], [30]),
+                    ],
+                    instance_id=42,
+                    model_name="llama-7b",
+                )
             )
-        )
-        time.sleep(_DRAIN_WAIT)
-        bus.stop()
+            time.sleep(_DRAIN_WAIT)
+        finally:
+            bus.stop()
 
         after = _read_counter_values()
         assert (
@@ -218,7 +220,7 @@ class TestL0NewAllocation:
         ) == 3
 
     def test_block_allocation_counters_export_to_prometheus(self):
-        code = r'''
+        code = r"""
 from dataclasses import dataclass
 import os
 import sys
@@ -258,7 +260,7 @@ for line in generate_latest(REGISTRY).decode().splitlines():
         print(line)
 sys.stdout.flush()
 os._exit(0)
-'''
+"""
         result = subprocess.run(
             [sys.executable, "-c", textwrap.dedent(code)],
             check=True,
@@ -274,26 +276,30 @@ os._exit(0)
     def test_new_block_no_lifecycle_histogram_emitted(self, bus, subscriber):
         count_before = _get_histogram_count("lmcache_mp.l0_block_lifetime_seconds")
         bus.start()
-        bus.publish(
-            _make_allocation_event(
-                [FakeBlockAllocationRecord("req-1", [0, 1, 2], [10, 20, 30])]
+        try:
+            bus.publish(
+                _make_allocation_event(
+                    [FakeBlockAllocationRecord("req-1", [0, 1, 2], [10, 20, 30])]
+                )
             )
-        )
-        time.sleep(_DRAIN_WAIT)
-        bus.stop()
+            time.sleep(_DRAIN_WAIT)
+        finally:
+            bus.stop()
 
         count_after = _get_histogram_count("lmcache_mp.l0_block_lifetime_seconds")
         assert count_after == count_before
 
     def test_shadow_map_populated(self, bus, subscriber):
         bus.start()
-        bus.publish(
-            _make_allocation_event(
-                [FakeBlockAllocationRecord("req-1", [10, 11], [100, 200])]
+        try:
+            bus.publish(
+                _make_allocation_event(
+                    [FakeBlockAllocationRecord("req-1", [10, 11], [100, 200])]
+                )
             )
-        )
-        time.sleep(_DRAIN_WAIT)
-        bus.stop()
+            time.sleep(_DRAIN_WAIT)
+        finally:
+            bus.stop()
 
         assert (0, 10) in subscriber._shadow
         assert (0, 11) in subscriber._shadow
@@ -332,15 +338,17 @@ class TestL0PrefixSharing:
     def test_prefix_sharing_adds_owner(self, bus, subscriber):
         """Prefix sharing should add the new request as co-owner."""
         bus.start()
-        bus.publish(
-            _make_allocation_event([FakeBlockAllocationRecord("req-A", [6], [99])])
-        )
-        time.sleep(_DRAIN_WAIT)
-        bus.publish(
-            _make_allocation_event([FakeBlockAllocationRecord("req-B", [6], [99])])
-        )
-        time.sleep(_DRAIN_WAIT)
-        bus.stop()
+        try:
+            bus.publish(
+                _make_allocation_event([FakeBlockAllocationRecord("req-A", [6], [99])])
+            )
+            time.sleep(_DRAIN_WAIT)
+            bus.publish(
+                _make_allocation_event([FakeBlockAllocationRecord("req-B", [6], [99])])
+            )
+            time.sleep(_DRAIN_WAIT)
+        finally:
+            bus.stop()
 
         state = subscriber._shadow[(0, 6)]
         assert "req-A" in state.owners
@@ -474,15 +482,17 @@ class TestL0EvictionDetection:
     def test_eviction_clears_old_owners(self, bus, subscriber):
         """Eviction should clear old owner references."""
         bus.start()
-        bus.publish(
-            _make_allocation_event([FakeBlockAllocationRecord("req-1", [40], [1])])
-        )
-        time.sleep(_DRAIN_WAIT)
-        bus.publish(
-            _make_allocation_event([FakeBlockAllocationRecord("req-2", [40], [2])])
-        )
-        time.sleep(_DRAIN_WAIT)
-        bus.stop()
+        try:
+            bus.publish(
+                _make_allocation_event([FakeBlockAllocationRecord("req-1", [40], [1])])
+            )
+            time.sleep(_DRAIN_WAIT)
+            bus.publish(
+                _make_allocation_event([FakeBlockAllocationRecord("req-2", [40], [2])])
+            )
+            time.sleep(_DRAIN_WAIT)
+        finally:
+            bus.stop()
 
         state = subscriber._shadow[(0, 40)]
         assert state.owners == {"req-2"}
@@ -567,28 +577,32 @@ class TestL0Sampling:
 class TestL0EdgeCases:
     def test_empty_block_ids(self, bus, subscriber):
         bus.start()
-        bus.publish(
-            _make_allocation_event([FakeBlockAllocationRecord("req-empty", [], [])])
-        )
-        time.sleep(_DRAIN_WAIT)
-        bus.stop()
+        try:
+            bus.publish(
+                _make_allocation_event([FakeBlockAllocationRecord("req-empty", [], [])])
+            )
+            time.sleep(_DRAIN_WAIT)
+        finally:
+            bus.stop()
 
         assert len(subscriber._shadow) == 0
 
     def test_same_req_same_block_ignored(self, bus, subscriber):
         """Same request reporting same block again should be ignored."""
         bus.start()
-        bus.publish(
-            _make_allocation_event([FakeBlockAllocationRecord("req-1", [50], [1])])
-        )
-        time.sleep(_DRAIN_WAIT)
+        try:
+            bus.publish(
+                _make_allocation_event([FakeBlockAllocationRecord("req-1", [50], [1])])
+            )
+            time.sleep(_DRAIN_WAIT)
 
-        # Same request, same block, same tokens — decode continuation.
-        bus.publish(
-            _make_allocation_event([FakeBlockAllocationRecord("req-1", [50], [1])])
-        )
-        time.sleep(_DRAIN_WAIT)
-        bus.stop()
+            # Same request, same block, same tokens — decode continuation.
+            bus.publish(
+                _make_allocation_event([FakeBlockAllocationRecord("req-1", [50], [1])])
+            )
+            time.sleep(_DRAIN_WAIT)
+        finally:
+            bus.stop()
 
         state = subscriber._shadow[(0, 50)]
         # No access recorded — it was the same request.
@@ -597,9 +611,11 @@ class TestL0EdgeCases:
     def test_end_session_unknown_req(self, bus, subscriber):
         """END_SESSION for unknown req_id should not crash."""
         bus.start()
-        bus.publish(_make_end_session_event("unknown-req"))
-        time.sleep(_DRAIN_WAIT)
-        bus.stop()
+        try:
+            bus.publish(_make_end_session_event("unknown-req"))
+            time.sleep(_DRAIN_WAIT)
+        finally:
+            bus.stop()
         # No crash = pass.
 
 
@@ -612,23 +628,25 @@ class TestL0MetricAttributes:
     def test_eviction_emits_instance_id_and_model_name(self, bus, subscriber):
         """Histogram data points should carry instance_id and model_name."""
         bus.start()
-        bus.publish(
-            _make_allocation_event(
-                [FakeBlockAllocationRecord("req-1", [60], [10])],
-                instance_id=42,
-                model_name="llama-7b",
+        try:
+            bus.publish(
+                _make_allocation_event(
+                    [FakeBlockAllocationRecord("req-1", [60], [10])],
+                    instance_id=42,
+                    model_name="llama-7b",
+                )
             )
-        )
-        time.sleep(_DRAIN_WAIT)
-        bus.publish(
-            _make_allocation_event(
-                [FakeBlockAllocationRecord("req-2", [60], [99])],
-                instance_id=42,
-                model_name="llama-7b",
+            time.sleep(_DRAIN_WAIT)
+            bus.publish(
+                _make_allocation_event(
+                    [FakeBlockAllocationRecord("req-2", [60], [99])],
+                    instance_id=42,
+                    model_name="llama-7b",
+                )
             )
-        )
-        time.sleep(_DRAIN_WAIT)
-        bus.stop()
+            time.sleep(_DRAIN_WAIT)
+        finally:
+            bus.stop()
 
         attrs_list = _get_histogram_attrs("lmcache_mp.l0_block_lifetime_seconds")
         matching = [
@@ -688,15 +706,17 @@ class TestL0CounterAttributes:
         before = _read_counter_values_by_attrs()
 
         bus.start()
-        bus.publish(
-            _make_allocation_event(
-                [FakeBlockAllocationRecord("req-attr", [70, 71], [100, 200])],
-                instance_id=instance_id,
-                model_name=model_name,
+        try:
+            bus.publish(
+                _make_allocation_event(
+                    [FakeBlockAllocationRecord("req-attr", [70, 71], [100, 200])],
+                    instance_id=instance_id,
+                    model_name=model_name,
+                )
             )
-        )
-        time.sleep(_DRAIN_WAIT)
-        bus.stop()
+            time.sleep(_DRAIN_WAIT)
+        finally:
+            bus.stop()
 
         after = _read_counter_values_by_attrs()
 
@@ -735,3 +755,38 @@ class TestL0CounterAttributes:
                         )
                         return
         pytest.fail("No matching data point found for the published event")
+
+
+class TestL0SkippedSetCap:
+    """Skipped block tracking remains bounded under sampling misses."""
+
+    def test_skipped_set_cap_evicts_entry_when_sampling_skips(self, monkeypatch):
+        from lmcache.v1.mp_observability.subscribers.metrics import l0_lifecycle
+        from lmcache.v1.mp_observability.subscribers.metrics.l0_lifecycle import (
+            L0LifecycleSubscriber,
+        )
+
+        monkeypatch.setattr(l0_lifecycle, "_MAX_SKIPPED", 2)
+        monkeypatch.setattr(L0LifecycleSubscriber, "_should_sample", lambda self: False)
+        subscriber = L0LifecycleSubscriber(sample_rate=1.0)
+        callback = subscriber.get_subscriptions()[EventType.MP_VLLM_BLOCK_ALLOCATION]
+
+        for block_id in (1, 2, 3):
+            callback(
+                Event(
+                    event_type=EventType.MP_VLLM_BLOCK_ALLOCATION,
+                    metadata={
+                        "instance_id": 0,
+                        "model_name": "model",
+                        "records": [
+                            FakeBlockAllocationRecord(
+                                req_id=f"req-{block_id}",
+                                new_block_ids=[block_id],
+                                new_token_ids=[block_id],
+                            )
+                        ],
+                    },
+                )
+            )
+
+        assert len(subscriber._skipped) == 2

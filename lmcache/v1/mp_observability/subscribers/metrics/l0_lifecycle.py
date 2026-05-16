@@ -34,6 +34,7 @@ Limitations:
 from __future__ import annotations
 
 # Standard
+import logging
 from collections import deque
 from dataclasses import dataclass, field
 from enum import Enum
@@ -50,8 +51,14 @@ from lmcache.v1.mp_observability.l0_boundary_evidence import (
     append_l0_block_boundary_event,
 )
 
+logger = logging.getLogger(__name__)
+
 # Maximum number of recent access timestamps kept per block (ring buffer).
 _MAX_ACCESS_HISTORY = 4
+# Maximum number of entries in the _skipped set.
+_MAX_SKIPPED = 10_000
+
+
 class _BlockStatus(Enum):
     ACTIVE = "active"  # Owned by at least one live request.
     RELEASED = "released"  # All owning requests have ended.
@@ -242,6 +249,12 @@ class L0LifecycleSubscriber(EventSubscriber):
                 return
 
             if not self._should_sample():
+                if len(self._skipped) >= _MAX_SKIPPED:
+                    self._skipped.pop()
+                    logger.warning(
+                        "_skipped set reached %d entries; evicted one entry",
+                        _MAX_SKIPPED,
+                    )
                 self._skipped.add(block_key)
                 return
 
