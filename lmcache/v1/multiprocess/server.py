@@ -5,7 +5,6 @@ from functools import partial
 from itertools import islice
 from typing import Generator
 import argparse
-import os
 import threading
 import time
 

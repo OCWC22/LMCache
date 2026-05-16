@@ -193,9 +193,9 @@ request scope and guard GPU callback races.  Published via `EventBus.publish()`
 | EventType | Metadata keys | Types | Published by / when |
 |---|---|---|---|
 | `CB_REQUEST_START` | *(none)* | — | `BlendEngineV2.cb_lookup_pre_computed` — at request arrival |
-| `CB_STORE_PRE_COMPUTED_SUBMITTED` | `instance_id` | `int` | `BlendEngineV2.cb_store_pre_computed` — before GPU store enqueue |
-| `CB_RETRIEVE_SUBMITTED` | `instance_id` | `int` | `BlendEngineV2.cb_retrieve_pre_computed` — before GPU retrieve enqueue |
-| `CB_STORE_FINAL_SUBMITTED` | `instance_id` | `int` | `BlendEngineV2.cb_store_final` — before GPU store enqueue |
+| `CB_STORE_PRE_COMPUTED_SUBMITTED` | `instance_id`, `num_chunks`, `num_tokens` | `int`, `int`, `int` | `BlendEngineV2.cb_store_pre_computed` — before GPU store enqueue |
+| `CB_RETRIEVE_SUBMITTED` | `instance_id`, `num_chunks`, `num_tokens` | `int`, `int`, `int` | `BlendEngineV2.cb_retrieve_pre_computed` — before GPU retrieve enqueue |
+| `CB_STORE_FINAL_SUBMITTED` | `instance_id`, `num_chunks`, `num_tokens` | `int`, `int`, `int` | `BlendEngineV2.cb_store_final` — before GPU store enqueue |
 | `CB_REQUEST_END` | *(none)* | — | `BlendEngineV2.cb_lookup_pre_computed` (early return: no matches or no GPU context) **or** `BlendEngineV2.cb_store_final` — after SUBMITTED, before GPU work |
 
 ---
