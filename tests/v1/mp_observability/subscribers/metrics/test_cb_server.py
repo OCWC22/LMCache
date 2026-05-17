@@ -782,6 +782,148 @@ os._exit(0)
         assert "secret-hash" not in result.stdout
         assert "secret-key" not in result.stdout
 
+    def test_cb_prometheus_export_covers_full_current_metric_surface(self):
+        code = r"""
+import os
+import sys
+import time
+
+from opentelemetry import metrics
+from opentelemetry.exporter.prometheus import PrometheusMetricReader
+from opentelemetry.sdk.metrics import MeterProvider
+from prometheus_client import REGISTRY, generate_latest
+
+from lmcache.v1.mp_observability.event import Event, EventType
+from lmcache.v1.mp_observability.event_bus import EventBus, EventBusConfig
+from lmcache.v1.mp_observability.subscribers.metrics.cb_server import (
+    BlendMetricsSubscriber,
+)
+
+reader = PrometheusMetricReader()
+metrics.set_meter_provider(MeterProvider(metric_readers=[reader]))
+bus = EventBus(EventBusConfig(enabled=True, max_queue_size=100))
+bus.register_subscriber(BlendMetricsSubscriber())
+bus.start()
+try:
+    events = [
+        Event(EventType.CB_LOOKUP_START, "req-lookup", {}),
+        Event(
+            EventType.CB_LOOKUP_END,
+            "req-lookup",
+            {
+                "requested_tokens": 100,
+                "hit_tokens": 75,
+                "fingerprint_hits": 10,
+                "storage_hits": 8,
+                "stale_chunks": 2,
+                "no_gpu_context": True,
+            },
+        ),
+        Event(
+            EventType.CB_RETRIEVE_START,
+            "req-retrieve",
+            {"instance_id": 1, "num_chunks": 3, "num_tokens": 768},
+        ),
+        Event(
+            EventType.CB_RETRIEVE_END,
+            "req-retrieve",
+            {
+                "instance_id": 1,
+                "num_chunks": 3,
+                "num_tokens": 768,
+                "success": False,
+            },
+        ),
+        Event(
+            EventType.CB_STORE_PRE_COMPUTED_START,
+            "req-pre",
+            {"instance_id": 2, "num_chunks": 4, "num_tokens": 1024},
+        ),
+        Event(
+            EventType.CB_STORE_PRE_COMPUTED_END,
+            "req-pre",
+            {
+                "instance_id": 2,
+                "stored_chunks": 4,
+                "num_tokens": 1024,
+                "success": False,
+            },
+        ),
+        Event(
+            EventType.CB_STORE_FINAL_START,
+            "req-final",
+            {"instance_id": 3, "num_chunks": 5, "num_tokens": 1280},
+        ),
+        Event(
+            EventType.CB_STORE_FINAL_END,
+            "req-final",
+            {
+                "instance_id": 3,
+                "stored_chunks": 5,
+                "num_tokens": 1280,
+                "success": False,
+            },
+        ),
+        Event(
+            EventType.CB_RETRIEVE_START,
+            "req-retrieve-ok",
+            {"instance_id": 4, "num_chunks": 6, "num_tokens": 1536},
+        ),
+        Event(
+            EventType.CB_RETRIEVE_END,
+            "req-retrieve-ok",
+            {
+                "instance_id": 4,
+                "num_chunks": 6,
+                "num_tokens": 1536,
+                "success": True,
+            },
+        ),
+        Event(EventType.CB_FINGERPRINTS_REGISTERED, "req-fp", {"num_chunks": 9}),
+        Event(EventType.CB_CHUNKS_EVICTED, "req-evict", {"num_chunks": 2}),
+    ]
+    for event in events:
+        bus.publish(event)
+    time.sleep(0.2)
+finally:
+    bus.stop()
+
+print(generate_latest(REGISTRY).decode())
+sys.stdout.flush()
+os._exit(0)
+"""
+        result = subprocess.run(
+            [sys.executable, "-c", textwrap.dedent(code)],
+            check=True,
+            capture_output=True,
+            text=True,
+            timeout=15,
+        )
+        for metric_name in (
+            "lmcache_blend_lookup_requests_total",
+            "lmcache_blend_lookup_requested_tokens_total",
+            "lmcache_blend_lookup_hit_tokens_total",
+            "lmcache_blend_lookup_fingerprint_hits_total",
+            "lmcache_blend_lookup_storage_hits_total",
+            "lmcache_blend_lookup_stale_chunks_total",
+            "lmcache_blend_lookup_no_gpu_context_errors_total",
+            "lmcache_blend_retrieve_requests_total",
+            "lmcache_blend_retrieve_chunks_total",
+            "lmcache_blend_retrieve_failures_total",
+            "lmcache_blend_store_pre_computed_requests_total",
+            "lmcache_blend_store_pre_computed_chunks_total",
+            "lmcache_blend_store_pre_computed_failures_total",
+            "lmcache_blend_store_final_requests_total",
+            "lmcache_blend_store_final_chunks_total",
+            "lmcache_blend_store_final_failures_total",
+            "lmcache_blend_fingerprints_registered_total",
+            "lmcache_blend_chunks_evicted_total",
+            "lmcache_blend_l0_gpu_operation_duration_seconds",
+            "lmcache_blend_l0_gpu_transfer_chunks_total",
+            "lmcache_blend_l0_gpu_transfer_tokens_total",
+        ):
+            assert metric_name in result.stdout
+
     def test_cb_l0_boundary_evidence_records_all_cpu_submitted_sentinels(
         self, bus, subscriber, tmp_path, monkeypatch
     ):
