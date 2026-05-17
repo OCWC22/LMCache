@@ -651,6 +651,68 @@ class TestBlendL0GpuObservability:
             == 0
         )
 
+    def test_store_final_records_l0_transfer_direction_and_duration(
+        self, bus, subscriber
+    ):
+        duration_before = _histogram_count(
+            "lmcache_blend.l0_gpu_operation_duration_seconds"
+        )
+        bus.start()
+        try:
+            bus.publish(
+                Event(
+                    event_type=EventType.CB_STORE_FINAL_START,
+                    session_id="req-store-final-l0",
+                    timestamp=210.0,
+                    metadata={"instance_id": 6, "num_chunks": 3, "num_tokens": 768},
+                )
+            )
+            bus.publish(
+                Event(
+                    event_type=EventType.CB_STORE_FINAL_END,
+                    session_id="req-store-final-l0",
+                    timestamp=210.125,
+                    metadata={
+                        "instance_id": 6,
+                        "stored_chunks": 3,
+                        "num_tokens": 768,
+                        "success": True,
+                    },
+                )
+            )
+            time.sleep(_DRAIN_WAIT)
+        finally:
+            bus.stop()
+
+        assert (
+            _histogram_count("lmcache_blend.l0_gpu_operation_duration_seconds")
+            - duration_before
+        ) == 1
+        assert {
+            "operation": "store_final",
+            "direction": "gpu_to_l1",
+            "instance_id": 6,
+            "success": True,
+        } in _histogram_attrs("lmcache_blend.l0_gpu_operation_duration_seconds")
+        assert (
+            _counter_sum(
+                "lmcache_blend.l0_gpu_transfer_chunks",
+                operation="store_final",
+                instance_id=6,
+                direction="gpu_to_l1",
+            )
+            >= 3
+        )
+        assert (
+            _counter_sum(
+                "lmcache_blend.l0_gpu_transfer_tokens",
+                operation="store_final",
+                instance_id=6,
+                direction="gpu_to_l1",
+            )
+            >= 768
+        )
+
     def test_cb_l0_metrics_export_to_prometheus(self):
         code = r"""
 import os
@@ -719,6 +781,59 @@ os._exit(0)
         assert "block_ids" not in result.stdout
         assert "secret-hash" not in result.stdout
         assert "secret-key" not in result.stdout
+
+    def test_cb_l0_boundary_evidence_records_all_cpu_submitted_sentinels(
+        self, bus, subscriber, tmp_path, monkeypatch
+    ):
+        evidence_path = tmp_path / "cb-l0-submitted.jsonl"
+        monkeypatch.setenv(L0_BLOCK_BOUNDARY_EVIDENCE_ENV, str(evidence_path))
+        reset_l0_block_boundary_evidence_path_cache()
+        bus.start()
+        try:
+            for event_type in (
+                EventType.CB_STORE_PRE_COMPUTED_SUBMITTED,
+                EventType.CB_RETRIEVE_SUBMITTED,
+                EventType.CB_STORE_FINAL_SUBMITTED,
+            ):
+                bus.publish(
+                    Event(
+                        event_type=event_type,
+                        session_id="req-submitted",
+                        metadata={
+                            "instance_id": 4,
+                            "num_chunks": 2,
+                            "num_tokens": 512,
+                            "token_ids": [1, 2],
+                            "block_ids": [3, 4],
+                            "hashes": ["secret-hash"],
+                            "object_keys": ["secret-key"],
+                        },
+                    )
+                )
+            time.sleep(_DRAIN_WAIT)
+        finally:
+            bus.stop()
+            reset_l0_block_boundary_evidence_path_cache()
+
+        events = [
+            json.loads(line)
+            for line in evidence_path.read_text(encoding="utf-8").splitlines()
+        ]
+        assert [event["stage"] for event in events] == [
+            "cb_store_pre_computed_submitted",
+            "cb_retrieve_pre_computed_submitted",
+            "cb_store_final_submitted",
+        ]
+        assert [event["operation"] for event in events] == [
+            "store_pre_computed",
+            "retrieve_pre_computed",
+            "store_final",
+        ]
+        redacted = json.dumps(events)
+        assert "token_ids" not in redacted
+        assert "block_ids" not in redacted
+        assert "secret-hash" not in redacted
+        assert "secret-key" not in redacted
 
     def test_cb_l0_boundary_evidence_is_redacted(
         self, bus, subscriber, tmp_path, monkeypatch
