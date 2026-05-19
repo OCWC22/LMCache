@@ -239,8 +239,9 @@ class TestSerdeEncodeMetrics:
         attrs = _serde_histogram_attrs("lmcache_blend.serde_encode_duration_seconds")
         matching = [a for a in attrs if a.get("serde_type") == "naive"]
         assert len(matching) >= 1
-        assert matching[0]["success"] is True
-        assert matching[0]["num_objects"] == 1
+        assert any(
+            a.get("success") is True and a.get("num_objects") == 1 for a in matching
+        )
 
     def test_decode_duration_carries_num_objects_attr(self, bus, subscriber):
         bus.start()
@@ -585,3 +586,214 @@ class TestSerdePendingOpsCap:
         assert len(subscriber._pending_ops) == 2
         assert "encode:one" not in subscriber._pending_ops
         assert "encode:three" in subscriber._pending_ops
+
+    def test_pending_ops_cap_logs_warning(self, monkeypatch, subscriber):
+        """When the cap is exceeded, a warning must be logged via the module logger."""
+        from unittest.mock import patch
+
+        from lmcache.v1.mp_observability.subscribers.metrics import serde
+
+        monkeypatch.setattr(serde, "_MAX_PENDING_OPS", 1)
+        callbacks = subscriber.get_subscriptions()
+
+        with patch.object(serde.logger, "warning") as mock_warn:
+            callbacks[EventType.CB_SERDE_ENCODE_START](
+                Event(
+                    event_type=EventType.CB_SERDE_ENCODE_START,
+                    session_id="first",
+                    timestamp=1.0,
+                    metadata={"serde_type": "fp8"},
+                )
+            )
+            callbacks[EventType.CB_SERDE_ENCODE_START](
+                Event(
+                    event_type=EventType.CB_SERDE_ENCODE_START,
+                    session_id="second",
+                    timestamp=2.0,
+                    metadata={"serde_type": "fp8"},
+                )
+            )
+
+        mock_warn.assert_called_once()
+        assert "_pending_ops exceeded" in mock_warn.call_args[0][0]
+
+
+class TestSerdeDecodeEndWithoutStart:
+    """Decode END events without matching START should still record bytes but skip
+    duration."""
+
+    def test_decode_end_without_start_records_bytes(self, bus, subscriber, snapshot):
+        before_decode_count = _serde_histogram_count(
+            "lmcache_blend.serde_decode_duration_seconds"
+        )
+        bus.start()
+        try:
+            bus.publish(
+                Event(
+                    event_type=EventType.CB_SERDE_DECODE_END,
+                    session_id="serde-orphan-decode",
+                    timestamp=200.5,
+                    metadata={
+                        "serde_type": "fp8",
+                        "num_objects": 2,
+                        "bytes_in": 1024,
+                        "bytes_out": 2048,
+                        "success": True,
+                    },
+                )
+            )
+            time.sleep(_DRAIN_WAIT)
+        finally:
+            bus.stop()
+
+        delta = snapshot()
+        assert delta.get("lmcache_blend.serde_bytes_in", 0) >= 1024
+        assert delta.get("lmcache_blend.serde_bytes_out", 0) >= 2048
+        # Duration should NOT be recorded for orphan END
+        after_decode_count = _serde_histogram_count(
+            "lmcache_blend.serde_decode_duration_seconds"
+        )
+        assert after_decode_count == before_decode_count
+
+
+class TestSerdeEncodeEndWithoutStartSkipsDuration:
+    """Verify orphan encode END skips duration but records bytes."""
+
+    def test_encode_end_without_start_skips_duration(self, bus, subscriber):
+        before_encode_count = _serde_histogram_count(
+            "lmcache_blend.serde_encode_duration_seconds"
+        )
+        bus.start()
+        try:
+            bus.publish(
+                Event(
+                    event_type=EventType.CB_SERDE_ENCODE_END,
+                    session_id="serde-orphan-enc-nodur",
+                    timestamp=300.5,
+                    metadata={
+                        "serde_type": "naive",
+                        "num_objects": 1,
+                        "bytes_in": 256,
+                        "bytes_out": 256,
+                        "success": True,
+                    },
+                )
+            )
+            time.sleep(_DRAIN_WAIT)
+        finally:
+            bus.stop()
+
+        after_encode_count = _serde_histogram_count(
+            "lmcache_blend.serde_encode_duration_seconds"
+        )
+        assert after_encode_count == before_encode_count
+
+
+class TestSerdeConcurrentOperations:
+    """Multiple concurrent serde operations with different session_ids."""
+
+    def test_interleaved_encode_decode_tracked_separately(self, bus, subscriber):
+        before_encode = _serde_histogram_count(
+            "lmcache_blend.serde_encode_duration_seconds"
+        )
+        before_decode = _serde_histogram_count(
+            "lmcache_blend.serde_decode_duration_seconds"
+        )
+        bus.start()
+        try:
+            # Start two encode and one decode concurrently
+            bus.publish(
+                Event(
+                    event_type=EventType.CB_SERDE_ENCODE_START,
+                    session_id="concurrent-enc-1",
+                    timestamp=400.0,
+                    metadata={"serde_type": "fp8", "num_objects": 1},
+                )
+            )
+            bus.publish(
+                Event(
+                    event_type=EventType.CB_SERDE_DECODE_START,
+                    session_id="concurrent-dec-1",
+                    timestamp=400.01,
+                    metadata={"serde_type": "naive", "num_objects": 2},
+                )
+            )
+            bus.publish(
+                Event(
+                    event_type=EventType.CB_SERDE_ENCODE_START,
+                    session_id="concurrent-enc-2",
+                    timestamp=400.02,
+                    metadata={"serde_type": "cachegen", "num_objects": 3},
+                )
+            )
+            # End them in different order
+            bus.publish(
+                Event(
+                    event_type=EventType.CB_SERDE_DECODE_END,
+                    session_id="concurrent-dec-1",
+                    timestamp=400.1,
+                    metadata={
+                        "serde_type": "naive",
+                        "num_objects": 2,
+                        "bytes_in": 512,
+                        "bytes_out": 1024,
+                        "success": True,
+                    },
+                )
+            )
+            bus.publish(
+                Event(
+                    event_type=EventType.CB_SERDE_ENCODE_END,
+                    session_id="concurrent-enc-2",
+                    timestamp=400.12,
+                    metadata={
+                        "serde_type": "cachegen",
+                        "num_objects": 3,
+                        "bytes_in": 6144,
+                        "bytes_out": 2048,
+                        "success": True,
+                    },
+                )
+            )
+            bus.publish(
+                Event(
+                    event_type=EventType.CB_SERDE_ENCODE_END,
+                    session_id="concurrent-enc-1",
+                    timestamp=400.15,
+                    metadata={
+                        "serde_type": "fp8",
+                        "num_objects": 1,
+                        "bytes_in": 4096,
+                        "bytes_out": 2048,
+                        "success": True,
+                    },
+                )
+            )
+            time.sleep(_DRAIN_WAIT)
+        finally:
+            bus.stop()
+
+        after_encode = _serde_histogram_count(
+            "lmcache_blend.serde_encode_duration_seconds"
+        )
+        after_decode = _serde_histogram_count(
+            "lmcache_blend.serde_decode_duration_seconds"
+        )
+        assert after_encode - before_encode == 2
+        assert after_decode - before_decode == 1
+
+
+class TestSerdeSubscriptionContractExact:
+    """Verify the exact set of subscriptions returned by get_subscriptions()."""
+
+    def test_subscription_count_and_all_callable(self, subscriber):
+        subs = subscriber.get_subscriptions()
+        expected = {
+            EventType.CB_SERDE_ENCODE_START,
+            EventType.CB_SERDE_ENCODE_END,
+            EventType.CB_SERDE_DECODE_START,
+            EventType.CB_SERDE_DECODE_END,
+        }
+        assert set(subs.keys()) == expected
+        for callback in subs.values():
+            assert callable(callback)

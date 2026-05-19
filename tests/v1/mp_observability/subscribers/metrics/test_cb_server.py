@@ -1072,3 +1072,394 @@ class TestBlendPendingOpsCap:
             EventType.CB_RETRIEVE_START,
         ) not in subscriber._pending_l0_gpu_ops
         assert "three:cb.retrieve.start" in subscriber._pending_l0_gpu_ops
+
+    def test_pending_l0_gpu_ops_cap_logs_warning(self, monkeypatch, subscriber):
+        """When the cap is exceeded, a warning must be logged via the module logger."""
+        from unittest.mock import patch
+
+        from lmcache.v1.mp_observability.subscribers.metrics import cb_server
+
+        monkeypatch.setattr(cb_server, "_MAX_PENDING_L0_GPU_OPS", 1)
+        callbacks = subscriber.get_subscriptions()
+
+        with patch.object(cb_server.logger, "warning") as mock_warn:
+            callbacks[EventType.CB_RETRIEVE_START](
+                Event(
+                    event_type=EventType.CB_RETRIEVE_START,
+                    session_id="first",
+                    timestamp=1.0,
+                    metadata={"instance_id": "inst", "num_chunks": 1, "num_tokens": 16},
+                )
+            )
+            callbacks[EventType.CB_RETRIEVE_START](
+                Event(
+                    event_type=EventType.CB_RETRIEVE_START,
+                    session_id="second",
+                    timestamp=2.0,
+                    metadata={"instance_id": "inst", "num_chunks": 1, "num_tokens": 16},
+                )
+            )
+
+        mock_warn.assert_called_once()
+        assert "_pending_l0_gpu_ops exceeded" in mock_warn.call_args[0][0]
+
+
+class TestBlendSuccessPathCounters:
+    """Verify that success-path counters (requests + chunks) increment correctly."""
+
+    def test_retrieve_success_path_counters(self, bus, subscriber, snapshot):
+        """Successful retrieve must increment retrieve_requests and retrieve_chunks."""
+        bus.start()
+        try:
+            bus.publish(
+                Event(
+                    event_type=EventType.CB_RETRIEVE_START,
+                    session_id="req-ret-ok",
+                    timestamp=400.0,
+                    metadata={"instance_id": 0, "num_chunks": 7},
+                )
+            )
+            bus.publish(
+                Event(
+                    event_type=EventType.CB_RETRIEVE_END,
+                    session_id="req-ret-ok",
+                    timestamp=400.1,
+                    metadata={
+                        "instance_id": 0,
+                        "num_chunks": 7,
+                        "success": True,
+                    },
+                )
+            )
+            time.sleep(_DRAIN_WAIT)
+        finally:
+            bus.stop()
+
+        delta = snapshot()
+        assert delta.get("lmcache_blend.retrieve_requests", 0) >= 1
+        assert delta.get("lmcache_blend.retrieve_chunks", 0) >= 7
+
+    def test_store_pre_computed_success_path_counters(self, bus, subscriber, snapshot):
+        """Successful store_pre_computed must increment requests + chunks."""
+        bus.start()
+        try:
+            bus.publish(
+                Event(
+                    event_type=EventType.CB_STORE_PRE_COMPUTED_START,
+                    session_id="req-sp-ok",
+                    timestamp=500.0,
+                    metadata={"instance_id": 0, "num_chunks": 5, "num_tokens": 320},
+                )
+            )
+            bus.publish(
+                Event(
+                    event_type=EventType.CB_STORE_PRE_COMPUTED_END,
+                    session_id="req-sp-ok",
+                    timestamp=500.05,
+                    metadata={
+                        "instance_id": 0,
+                        "stored_chunks": 5,
+                        "success": True,
+                    },
+                )
+            )
+            time.sleep(_DRAIN_WAIT)
+        finally:
+            bus.stop()
+
+        delta = snapshot()
+        assert delta.get("lmcache_blend.store_pre_computed_requests", 0) >= 1
+        assert delta.get("lmcache_blend.store_pre_computed_chunks", 0) >= 5
+        # No failure should be recorded
+        assert delta.get("lmcache_blend.store_pre_computed_failures", 0) == 0
+
+    def test_store_final_success_path_counters(self, bus, subscriber, snapshot):
+        """Successful store_final must increment requests + chunks."""
+        bus.start()
+        try:
+            bus.publish(
+                Event(
+                    event_type=EventType.CB_STORE_FINAL_START,
+                    session_id="req-sf-ok",
+                    timestamp=600.0,
+                    metadata={"instance_id": 1, "num_chunks": 3, "num_tokens": 192},
+                )
+            )
+            bus.publish(
+                Event(
+                    event_type=EventType.CB_STORE_FINAL_END,
+                    session_id="req-sf-ok",
+                    timestamp=600.08,
+                    metadata={
+                        "instance_id": 1,
+                        "stored_chunks": 3,
+                        "success": True,
+                    },
+                )
+            )
+            time.sleep(_DRAIN_WAIT)
+        finally:
+            bus.stop()
+
+        delta = snapshot()
+        assert delta.get("lmcache_blend.store_final_requests", 0) >= 1
+        assert delta.get("lmcache_blend.store_final_chunks", 0) >= 3
+        assert delta.get("lmcache_blend.store_final_failures", 0) == 0
+
+
+class TestBlendL0GpuAttributeStrictness:
+    """Verify OTel attributes (operation, direction, instance_id, success) on
+    L0 GPU histogram and transfer counter data points."""
+
+    def test_retrieve_l0_gpu_attribute_set(self, bus, subscriber):
+        """Retrieve success: verify all four attrs on histogram and transfer counter."""
+        bus.start()
+        try:
+            bus.publish(
+                Event(
+                    event_type=EventType.CB_RETRIEVE_START,
+                    session_id="attr-retrieve",
+                    timestamp=700.0,
+                    metadata={"instance_id": 42, "num_chunks": 4, "num_tokens": 256},
+                )
+            )
+            bus.publish(
+                Event(
+                    event_type=EventType.CB_RETRIEVE_END,
+                    session_id="attr-retrieve",
+                    timestamp=700.1,
+                    metadata={
+                        "instance_id": 42,
+                        "num_chunks": 4,
+                        "num_tokens": 256,
+                        "success": True,
+                    },
+                )
+            )
+            time.sleep(_DRAIN_WAIT)
+        finally:
+            bus.stop()
+
+        # Verify histogram attributes
+        expected_hist_attrs = {
+            "operation": "retrieve_pre_computed",
+            "direction": "l1_to_gpu",
+            "instance_id": 42,
+            "success": True,
+        }
+        assert expected_hist_attrs in _histogram_attrs(
+            "lmcache_blend.l0_gpu_operation_duration_seconds"
+        )
+
+        # Verify transfer_chunks counter attributes (no success attr on transfer)
+        assert (
+            _counter_sum(
+                "lmcache_blend.l0_gpu_transfer_chunks",
+                operation="retrieve_pre_computed",
+                instance_id=42,
+                direction="l1_to_gpu",
+            )
+            >= 4
+        )
+        assert (
+            _counter_sum(
+                "lmcache_blend.l0_gpu_transfer_tokens",
+                operation="retrieve_pre_computed",
+                instance_id=42,
+                direction="l1_to_gpu",
+            )
+            >= 256
+        )
+
+    def test_store_final_l0_gpu_failure_no_transfer(self, bus, subscriber):
+        """Failed store_final: duration recorded with success=False, transfer=0."""
+        bus.start()
+        try:
+            bus.publish(
+                Event(
+                    event_type=EventType.CB_STORE_FINAL_START,
+                    session_id="attr-fail",
+                    timestamp=800.0,
+                    metadata={"instance_id": 99, "num_chunks": 2, "num_tokens": 128},
+                )
+            )
+            bus.publish(
+                Event(
+                    event_type=EventType.CB_STORE_FINAL_END,
+                    session_id="attr-fail",
+                    timestamp=800.05,
+                    metadata={
+                        "instance_id": 99,
+                        "stored_chunks": 0,
+                        "success": False,
+                    },
+                )
+            )
+            time.sleep(_DRAIN_WAIT)
+        finally:
+            bus.stop()
+
+        expected_hist_attrs = {
+            "operation": "store_final",
+            "direction": "gpu_to_l1",
+            "instance_id": 99,
+            "success": False,
+        }
+        assert expected_hist_attrs in _histogram_attrs(
+            "lmcache_blend.l0_gpu_operation_duration_seconds"
+        )
+        # Failed ops should not record transfer counters
+        assert (
+            _counter_sum(
+                "lmcache_blend.l0_gpu_transfer_chunks",
+                operation="store_final",
+                instance_id=99,
+                direction="gpu_to_l1",
+            )
+            == 0
+        )
+
+
+class TestBlendL0BoundaryEvidenceFullCoverage:
+    """Verify append_cb_l0_boundary_event called for submitted, start, and end
+    events across ALL three operation types."""
+
+    def test_store_pre_computed_evidence_all_stages(
+        self, bus, subscriber, tmp_path, monkeypatch
+    ):
+        evidence_path = tmp_path / "sp-evidence.jsonl"
+        monkeypatch.setenv(L0_BLOCK_BOUNDARY_EVIDENCE_ENV, str(evidence_path))
+        reset_l0_block_boundary_evidence_path_cache()
+        bus.start()
+        try:
+            bus.publish(
+                Event(
+                    event_type=EventType.CB_STORE_PRE_COMPUTED_SUBMITTED,
+                    session_id="req-sp-ev",
+                    metadata={
+                        "instance_id": 10,
+                        "num_chunks": 3,
+                        "num_tokens": 192,
+                    },
+                )
+            )
+            bus.publish(
+                Event(
+                    event_type=EventType.CB_STORE_PRE_COMPUTED_START,
+                    session_id="req-sp-ev",
+                    timestamp=900.0,
+                    metadata={
+                        "instance_id": 10,
+                        "num_chunks": 3,
+                        "num_tokens": 192,
+                    },
+                )
+            )
+            bus.publish(
+                Event(
+                    event_type=EventType.CB_STORE_PRE_COMPUTED_END,
+                    session_id="req-sp-ev",
+                    timestamp=900.1,
+                    metadata={
+                        "instance_id": 10,
+                        "stored_chunks": 3,
+                        "success": True,
+                    },
+                )
+            )
+            time.sleep(_DRAIN_WAIT)
+        finally:
+            bus.stop()
+            reset_l0_block_boundary_evidence_path_cache()
+
+        events = [
+            json.loads(line)
+            for line in evidence_path.read_text(encoding="utf-8").splitlines()
+        ]
+        stages = [e["stage"] for e in events]
+        assert "cb_store_pre_computed_submitted" in stages
+        assert "cb_store_pre_computed_gpu_start" in stages
+        assert "cb_store_pre_computed_gpu_end" in stages
+        assert all(e["operation"] == "store_pre_computed" for e in events)
+
+    def test_retrieve_evidence_all_stages(self, bus, subscriber, tmp_path, monkeypatch):
+        evidence_path = tmp_path / "ret-evidence.jsonl"
+        monkeypatch.setenv(L0_BLOCK_BOUNDARY_EVIDENCE_ENV, str(evidence_path))
+        reset_l0_block_boundary_evidence_path_cache()
+        bus.start()
+        try:
+            bus.publish(
+                Event(
+                    event_type=EventType.CB_RETRIEVE_SUBMITTED,
+                    session_id="req-ret-ev",
+                    metadata={
+                        "instance_id": 11,
+                        "num_chunks": 2,
+                        "num_tokens": 128,
+                    },
+                )
+            )
+            bus.publish(
+                Event(
+                    event_type=EventType.CB_RETRIEVE_START,
+                    session_id="req-ret-ev",
+                    timestamp=910.0,
+                    metadata={
+                        "instance_id": 11,
+                        "num_chunks": 2,
+                        "num_tokens": 128,
+                    },
+                )
+            )
+            bus.publish(
+                Event(
+                    event_type=EventType.CB_RETRIEVE_END,
+                    session_id="req-ret-ev",
+                    timestamp=910.15,
+                    metadata={
+                        "instance_id": 11,
+                        "num_chunks": 2,
+                        "num_tokens": 128,
+                        "success": True,
+                    },
+                )
+            )
+            time.sleep(_DRAIN_WAIT)
+        finally:
+            bus.stop()
+            reset_l0_block_boundary_evidence_path_cache()
+
+        events = [
+            json.loads(line)
+            for line in evidence_path.read_text(encoding="utf-8").splitlines()
+        ]
+        stages = [e["stage"] for e in events]
+        assert "cb_retrieve_pre_computed_submitted" in stages
+        assert "cb_retrieve_pre_computed_gpu_start" in stages
+        assert "cb_retrieve_pre_computed_gpu_end" in stages
+        assert all(e["operation"] == "retrieve_pre_computed" for e in events)
+
+
+class TestBlendSubscriptionContractExact:
+    """Verify the exact set of subscriptions returned by get_subscriptions()."""
+
+    def test_subscription_count_and_all_callable(self, subscriber):
+        subs = subscriber.get_subscriptions()
+        expected = {
+            EventType.CB_LOOKUP_START,
+            EventType.CB_LOOKUP_END,
+            EventType.CB_RETRIEVE_START,
+            EventType.CB_RETRIEVE_END,
+            EventType.CB_STORE_PRE_COMPUTED_START,
+            EventType.CB_STORE_PRE_COMPUTED_END,
+            EventType.CB_STORE_FINAL_START,
+            EventType.CB_STORE_FINAL_END,
+            EventType.CB_FINGERPRINTS_REGISTERED,
+            EventType.CB_CHUNKS_EVICTED,
+            EventType.CB_STORE_PRE_COMPUTED_SUBMITTED,
+            EventType.CB_RETRIEVE_SUBMITTED,
+            EventType.CB_STORE_FINAL_SUBMITTED,
+        }
+        assert set(subs.keys()) == expected
+        for callback in subs.values():
+            assert callable(callback)
