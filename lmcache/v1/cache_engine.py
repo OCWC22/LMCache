@@ -656,6 +656,13 @@ class LMCacheEngine:
 
             # Allocate the memory object
             num_tokens = end - start
+            if num_tokens <= 0:
+                logger.debug(
+                    "Skipping zero-length layerwise store span: start=%d end=%d",
+                    start,
+                    end,
+                )
+                continue
             kv_shape_single_layer = self.gpu_connector.get_shape(num_tokens)
 
             memory_objs_multi_layer = self.storage_manager.batched_allocate(
