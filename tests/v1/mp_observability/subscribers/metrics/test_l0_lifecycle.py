@@ -11,6 +11,10 @@ provider and assert on histogram observations.
 
 # Standard
 from dataclasses import dataclass
+import json
+import subprocess
+import sys
+import textwrap
 import time
 
 # Third Party
@@ -19,6 +23,10 @@ import pytest
 # First Party
 from lmcache.v1.mp_observability.event import Event, EventType
 from lmcache.v1.mp_observability.event_bus import EventBus, EventBusConfig
+from lmcache.v1.mp_observability.l0_boundary_evidence import (
+    L0_BLOCK_BOUNDARY_EVIDENCE_ENV,
+    reset_l0_block_boundary_evidence_path_cache,
+)
 from lmcache.v1.mp_observability.subscribers.metrics.l0_lifecycle import (
     L0LifecycleSubscriber,
     _BlockStatus,
@@ -90,6 +98,44 @@ def _get_histogram_attrs(name: str) -> list[dict]:
     return [dict(dp.attributes) for dp in dps if dp.count > 0]
 
 
+def _read_counter_values() -> dict[str, int]:
+    """Snapshot summed OTel counter values by metric name."""
+    data = _reader.get_metrics_data()
+    result: dict[str, int] = {}
+    if data is None:
+        return result
+    for resource_metrics in data.resource_metrics:
+        for scope_metrics in resource_metrics.scope_metrics:
+            for metric in scope_metrics.metrics:
+                total = 0
+                has_value = False
+                for dp in metric.data.data_points:
+                    if not hasattr(dp, "value"):
+                        continue
+                    total += int(dp.value)
+                    has_value = True
+                if has_value:
+                    result[metric.name] = result.get(metric.name, 0) + total
+    return result
+
+
+def _read_counter_values_by_attrs() -> dict[str, dict[tuple, int]]:
+    """Snapshot counter values keyed by (metric_name, attr_tuple)."""
+    data = _reader.get_metrics_data()
+    result: dict[str, dict[tuple, int]] = {}
+    if data is None:
+        return result
+    for resource_metrics in data.resource_metrics:
+        for scope_metrics in resource_metrics.scope_metrics:
+            for metric in scope_metrics.metrics:
+                for dp in metric.data.data_points:
+                    if not hasattr(dp, "value"):
+                        continue
+                    key = tuple(sorted(dict(dp.attributes).items()))
+                    result.setdefault(metric.name, {})[key] = int(dp.value)
+    return result
+
+
 # ---------------------------------------------------------------------------
 # Fixtures
 # ---------------------------------------------------------------------------
@@ -113,29 +159,147 @@ def subscriber(bus):
 
 
 class TestL0NewAllocation:
-    def test_new_block_no_metrics_emitted(self, bus, subscriber):
+    def test_boundary_evidence_records_processed_events(
+        self,
+        bus,
+        subscriber,
+        tmp_path,
+        monkeypatch,
+    ):
+        evidence_path = tmp_path / "l0-boundary.jsonl"
+        monkeypatch.setenv(L0_BLOCK_BOUNDARY_EVIDENCE_ENV, str(evidence_path))
+        reset_l0_block_boundary_evidence_path_cache()
+        bus.start()
+        try:
+            bus.publish(
+                _make_allocation_event(
+                    [FakeBlockAllocationRecord("req-1", [0, 1], [10, 20])]
+                )
+            )
+            time.sleep(_DRAIN_WAIT)
+        finally:
+            bus.stop()
+            reset_l0_block_boundary_evidence_path_cache()
+
+        [event] = [
+            json.loads(line)
+            for line in evidence_path.read_text(encoding="utf-8").splitlines()
+        ]
+        assert event["source"] == "lmcache_l0_lifecycle_subscriber"
+        assert event["stage"] == "l0_lifecycle_subscriber_processed"
+        assert event["records"] == [{"request_id": "req-1", "block_count": 2}]
+        assert event["metrics_updated_count"] == 2
+        assert "new_token_ids" not in json.dumps(event)
+
+    def test_block_allocation_updates_l0_block_counters(self, bus, subscriber):
+        before = _read_counter_values()
+        bus.start()
+        try:
+            bus.publish(
+                _make_allocation_event(
+                    [
+                        FakeBlockAllocationRecord("req-1", [0, 1], [10, 20]),
+                        FakeBlockAllocationRecord("req-2", [2], [30]),
+                    ],
+                    instance_id=42,
+                    model_name="llama-7b",
+                )
+            )
+            time.sleep(_DRAIN_WAIT)
+        finally:
+            bus.stop()
+
+        after = _read_counter_values()
+        assert (
+            after.get("lmcache_mp.l0_block_allocation_records", 0)
+            - before.get("lmcache_mp.l0_block_allocation_records", 0)
+        ) == 2
+        assert (
+            after.get("lmcache_mp.l0_block_allocated_blocks", 0)
+            - before.get("lmcache_mp.l0_block_allocated_blocks", 0)
+        ) == 3
+
+    def test_block_allocation_counters_export_to_prometheus(self):
+        code = r"""
+from dataclasses import dataclass
+import os
+import sys
+import time
+
+from opentelemetry import metrics
+from opentelemetry.exporter.prometheus import PrometheusMetricReader
+from opentelemetry.sdk.metrics import MeterProvider
+from prometheus_client import REGISTRY, generate_latest
+
+from lmcache.v1.mp_observability.event import Event, EventType
+from lmcache.v1.mp_observability.event_bus import EventBus, EventBusConfig
+from lmcache.v1.mp_observability.subscribers.metrics.l0_lifecycle import (
+    L0LifecycleSubscriber,
+)
+
+@dataclass
+class Rec:
+    req_id: str
+    new_block_ids: list[int]
+    new_token_ids: list[int]
+
+reader = PrometheusMetricReader()
+metrics.set_meter_provider(MeterProvider(metric_readers=[reader]))
+bus = EventBus(EventBusConfig(enabled=True, max_queue_size=100))
+bus.register_subscriber(L0LifecycleSubscriber(sample_rate=1.0))
+bus.start()
+bus.publish(Event(event_type=EventType.MP_VLLM_BLOCK_ALLOCATION, metadata={
+    "instance_id": 42,
+    "model_name": "llama-7b",
+    "records": [Rec("req-1", [0, 1], [10, 20])],
+}))
+time.sleep(0.2)
+bus.stop()
+for line in generate_latest(REGISTRY).decode().splitlines():
+    if "lmcache_mp_l0_block" in line:
+        print(line)
+sys.stdout.flush()
+os._exit(0)
+"""
+        result = subprocess.run(
+            [sys.executable, "-c", textwrap.dedent(code)],
+            check=True,
+            capture_output=True,
+            text=True,
+            timeout=15,
+        )
+        assert "lmcache_mp_l0_block_allocation_records_total" in result.stdout
+        assert "lmcache_mp_l0_block_allocated_blocks_total" in result.stdout
+        assert 'instance_id="42"' in result.stdout
+        assert 'model_name="llama-7b"' in result.stdout
+
+    def test_new_block_no_lifecycle_histogram_emitted(self, bus, subscriber):
         count_before = _get_histogram_count("lmcache_mp.l0_block_lifetime_seconds")
         bus.start()
-        bus.publish(
-            _make_allocation_event(
-                [FakeBlockAllocationRecord("req-1", [0, 1, 2], [10, 20, 30])]
+        try:
+            bus.publish(
+                _make_allocation_event(
+                    [FakeBlockAllocationRecord("req-1", [0, 1, 2], [10, 20, 30])]
+                )
             )
-        )
-        time.sleep(_DRAIN_WAIT)
-        bus.stop()
+            time.sleep(_DRAIN_WAIT)
+        finally:
+            bus.stop()
 
         count_after = _get_histogram_count("lmcache_mp.l0_block_lifetime_seconds")
         assert count_after == count_before
 
     def test_shadow_map_populated(self, bus, subscriber):
         bus.start()
-        bus.publish(
-            _make_allocation_event(
-                [FakeBlockAllocationRecord("req-1", [10, 11], [100, 200])]
+        try:
+            bus.publish(
+                _make_allocation_event(
+                    [FakeBlockAllocationRecord("req-1", [10, 11], [100, 200])]
+                )
             )
-        )
-        time.sleep(_DRAIN_WAIT)
-        bus.stop()
+            time.sleep(_DRAIN_WAIT)
+        finally:
+            bus.stop()
 
         assert (0, 10) in subscriber._shadow
         assert (0, 11) in subscriber._shadow
@@ -174,15 +338,17 @@ class TestL0PrefixSharing:
     def test_prefix_sharing_adds_owner(self, bus, subscriber):
         """Prefix sharing should add the new request as co-owner."""
         bus.start()
-        bus.publish(
-            _make_allocation_event([FakeBlockAllocationRecord("req-A", [6], [99])])
-        )
-        time.sleep(_DRAIN_WAIT)
-        bus.publish(
-            _make_allocation_event([FakeBlockAllocationRecord("req-B", [6], [99])])
-        )
-        time.sleep(_DRAIN_WAIT)
-        bus.stop()
+        try:
+            bus.publish(
+                _make_allocation_event([FakeBlockAllocationRecord("req-A", [6], [99])])
+            )
+            time.sleep(_DRAIN_WAIT)
+            bus.publish(
+                _make_allocation_event([FakeBlockAllocationRecord("req-B", [6], [99])])
+            )
+            time.sleep(_DRAIN_WAIT)
+        finally:
+            bus.stop()
 
         state = subscriber._shadow[(0, 6)]
         assert "req-A" in state.owners
@@ -316,15 +482,17 @@ class TestL0EvictionDetection:
     def test_eviction_clears_old_owners(self, bus, subscriber):
         """Eviction should clear old owner references."""
         bus.start()
-        bus.publish(
-            _make_allocation_event([FakeBlockAllocationRecord("req-1", [40], [1])])
-        )
-        time.sleep(_DRAIN_WAIT)
-        bus.publish(
-            _make_allocation_event([FakeBlockAllocationRecord("req-2", [40], [2])])
-        )
-        time.sleep(_DRAIN_WAIT)
-        bus.stop()
+        try:
+            bus.publish(
+                _make_allocation_event([FakeBlockAllocationRecord("req-1", [40], [1])])
+            )
+            time.sleep(_DRAIN_WAIT)
+            bus.publish(
+                _make_allocation_event([FakeBlockAllocationRecord("req-2", [40], [2])])
+            )
+            time.sleep(_DRAIN_WAIT)
+        finally:
+            bus.stop()
 
         state = subscriber._shadow[(0, 40)]
         assert state.owners == {"req-2"}
@@ -409,28 +577,32 @@ class TestL0Sampling:
 class TestL0EdgeCases:
     def test_empty_block_ids(self, bus, subscriber):
         bus.start()
-        bus.publish(
-            _make_allocation_event([FakeBlockAllocationRecord("req-empty", [], [])])
-        )
-        time.sleep(_DRAIN_WAIT)
-        bus.stop()
+        try:
+            bus.publish(
+                _make_allocation_event([FakeBlockAllocationRecord("req-empty", [], [])])
+            )
+            time.sleep(_DRAIN_WAIT)
+        finally:
+            bus.stop()
 
         assert len(subscriber._shadow) == 0
 
     def test_same_req_same_block_ignored(self, bus, subscriber):
         """Same request reporting same block again should be ignored."""
         bus.start()
-        bus.publish(
-            _make_allocation_event([FakeBlockAllocationRecord("req-1", [50], [1])])
-        )
-        time.sleep(_DRAIN_WAIT)
+        try:
+            bus.publish(
+                _make_allocation_event([FakeBlockAllocationRecord("req-1", [50], [1])])
+            )
+            time.sleep(_DRAIN_WAIT)
 
-        # Same request, same block, same tokens — decode continuation.
-        bus.publish(
-            _make_allocation_event([FakeBlockAllocationRecord("req-1", [50], [1])])
-        )
-        time.sleep(_DRAIN_WAIT)
-        bus.stop()
+            # Same request, same block, same tokens — decode continuation.
+            bus.publish(
+                _make_allocation_event([FakeBlockAllocationRecord("req-1", [50], [1])])
+            )
+            time.sleep(_DRAIN_WAIT)
+        finally:
+            bus.stop()
 
         state = subscriber._shadow[(0, 50)]
         # No access recorded — it was the same request.
@@ -439,9 +611,11 @@ class TestL0EdgeCases:
     def test_end_session_unknown_req(self, bus, subscriber):
         """END_SESSION for unknown req_id should not crash."""
         bus.start()
-        bus.publish(_make_end_session_event("unknown-req"))
-        time.sleep(_DRAIN_WAIT)
-        bus.stop()
+        try:
+            bus.publish(_make_end_session_event("unknown-req"))
+            time.sleep(_DRAIN_WAIT)
+        finally:
+            bus.stop()
         # No crash = pass.
 
 
@@ -454,23 +628,25 @@ class TestL0MetricAttributes:
     def test_eviction_emits_instance_id_and_model_name(self, bus, subscriber):
         """Histogram data points should carry instance_id and model_name."""
         bus.start()
-        bus.publish(
-            _make_allocation_event(
-                [FakeBlockAllocationRecord("req-1", [60], [10])],
-                instance_id=42,
-                model_name="llama-7b",
+        try:
+            bus.publish(
+                _make_allocation_event(
+                    [FakeBlockAllocationRecord("req-1", [60], [10])],
+                    instance_id=42,
+                    model_name="llama-7b",
+                )
             )
-        )
-        time.sleep(_DRAIN_WAIT)
-        bus.publish(
-            _make_allocation_event(
-                [FakeBlockAllocationRecord("req-2", [60], [99])],
-                instance_id=42,
-                model_name="llama-7b",
+            time.sleep(_DRAIN_WAIT)
+            bus.publish(
+                _make_allocation_event(
+                    [FakeBlockAllocationRecord("req-2", [60], [99])],
+                    instance_id=42,
+                    model_name="llama-7b",
+                )
             )
-        )
-        time.sleep(_DRAIN_WAIT)
-        bus.stop()
+            time.sleep(_DRAIN_WAIT)
+        finally:
+            bus.stop()
 
         attrs_list = _get_histogram_attrs("lmcache_mp.l0_block_lifetime_seconds")
         matching = [
@@ -479,3 +655,138 @@ class TestL0MetricAttributes:
             if a.get("instance_id") == "42" and a.get("model_name") == "llama-7b"
         ]
         assert len(matching) > 0
+
+
+# ---------------------------------------------------------------------------
+# Tests: Subscription surface contract
+# ---------------------------------------------------------------------------
+
+
+class TestL0SubscriptionContract:
+    """Verify get_subscriptions() returns exactly the expected event set."""
+
+    def test_subscriptions_returns_exact_event_set(self):
+        sub = L0LifecycleSubscriber(sample_rate=1.0)
+        subs = sub.get_subscriptions()
+
+        expected_keys = {
+            EventType.MP_VLLM_BLOCK_ALLOCATION,
+            EventType.MP_VLLM_END_SESSION,
+        }
+        assert set(subs.keys()) == expected_keys
+
+    def test_subscriptions_all_values_callable(self):
+        sub = L0LifecycleSubscriber(sample_rate=1.0)
+        subs = sub.get_subscriptions()
+
+        assert all(callable(v) for v in subs.values())
+
+
+# ---------------------------------------------------------------------------
+# Tests: Counter attribute strictness
+# ---------------------------------------------------------------------------
+
+
+class TestL0CounterAttributes:
+    """Verify counter data points carry exact attribute dimensions."""
+
+    def test_allocation_counter_attributes_include_instance_id_and_model_name(
+        self, bus, subscriber
+    ):
+        """Counter data points must carry exactly instance_id and model_name.
+
+        We snapshot before/after and look for the new data point created by
+        our event. OTel accumulates across tests in-process, so we must
+        match on the specific (instance_id, model_name) pair rather than
+        assuming only one data point exists.
+        """
+        instance_id = 7
+        model_name = "test-attr-model"
+
+        before = _read_counter_values_by_attrs()
+
+        bus.start()
+        try:
+            bus.publish(
+                _make_allocation_event(
+                    [FakeBlockAllocationRecord("req-attr", [70, 71], [100, 200])],
+                    instance_id=instance_id,
+                    model_name=model_name,
+                )
+            )
+            time.sleep(_DRAIN_WAIT)
+        finally:
+            bus.stop()
+
+        after = _read_counter_values_by_attrs()
+
+        # Find the data point for our specific (instance_id, model_name).
+        metric_name = "lmcache_mp.l0_block_allocation_records"
+        attr_key = (("instance_id", str(instance_id)), ("model_name", model_name))
+        before_val = before.get(metric_name, {}).get(attr_key, 0)
+        after_val = after.get(metric_name, {}).get(attr_key, 0)
+        assert after_val > before_val, (
+            f"Expected new data point for {attr_key} in {metric_name}"
+        )
+
+        # Verify the data point carries exactly the expected attributes.
+        data = _reader.get_metrics_data()
+        assert data is not None
+        for resource_metrics in data.resource_metrics:
+            for scope_metrics in resource_metrics.scope_metrics:
+                for metric in scope_metrics.metrics:
+                    if metric.name != metric_name:
+                        continue
+                    for dp in metric.data.data_points:
+                        if not hasattr(dp, "value") or int(dp.value) == 0:
+                            continue
+                        attrs = dict(dp.attributes)
+                        if attrs.get("instance_id") != str(instance_id):
+                            continue
+                        if attrs.get("model_name") != model_name:
+                            continue
+                        # Found our data point — verify exact attribute keys.
+                        assert set(attrs.keys()) == {
+                            "instance_id",
+                            "model_name",
+                        }, (
+                            f"Expected exactly {{instance_id, model_name}}, "
+                            f"got {set(attrs.keys())}"
+                        )
+                        return
+        pytest.fail("No matching data point found for the published event")
+
+
+class TestL0SkippedSetCap:
+    """Skipped block tracking remains bounded under sampling misses."""
+
+    def test_skipped_set_cap_evicts_entry_when_sampling_skips(self, monkeypatch):
+        from lmcache.v1.mp_observability.subscribers.metrics import l0_lifecycle
+        from lmcache.v1.mp_observability.subscribers.metrics.l0_lifecycle import (
+            L0LifecycleSubscriber,
+        )
+
+        monkeypatch.setattr(l0_lifecycle, "_MAX_SKIPPED", 2)
+        monkeypatch.setattr(L0LifecycleSubscriber, "_should_sample", lambda self: False)
+        subscriber = L0LifecycleSubscriber(sample_rate=1.0)
+        callback = subscriber.get_subscriptions()[EventType.MP_VLLM_BLOCK_ALLOCATION]
+
+        for block_id in (1, 2, 3):
+            callback(
+                Event(
+                    event_type=EventType.MP_VLLM_BLOCK_ALLOCATION,
+                    metadata={
+                        "instance_id": 0,
+                        "model_name": "model",
+                        "records": [
+                            FakeBlockAllocationRecord(
+                                req_id=f"req-{block_id}",
+                                new_block_ids=[block_id],
+                                new_token_ids=[block_id],
+                            )
+                        ],
+                    },
+                )
+            )
+
+        assert len(subscriber._skipped) == 2

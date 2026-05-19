@@ -10,9 +10,10 @@ This covers the health-monitoring surface for L2 prefetch (see LM-291):
     * ``not_found`` — L2 reported the key present during lookup but the load
       returned no data (adapter-level inconsistency, e.g. concurrent delete).
 
-The ``serde_failure`` reason is intentionally omitted until the serde PR
-lands; once it does, it becomes an additive third value of the same tag
-with no breaking change to dashboards.
+The ``serde_failure`` reason is covered by the separate
+``SerdeMetricsSubscriber`` (``lmcache_blend.serde_failures`` counter)
+which tracks serde encode/decode failures tagged by serde_type, direction,
+and failure_reason.
 
 All emissions carry ``model_name`` extracted from each ``ObjectKey``.
 """

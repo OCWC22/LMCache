@@ -14,6 +14,9 @@ import zmq
 # First Party
 from lmcache.integration.request_telemetry.factory import RequestTelemetryFactory
 from lmcache.utils import EngineType, _lmcache_nvtx_annotate, init_logger
+from lmcache.v1.mp_observability.l0_boundary_evidence import (
+    append_l0_block_boundary_event,
+)
 from lmcache.v1.multiprocess.custom_types import (
     BlockAllocationRecord,
     CudaIPCWrapper,
@@ -706,6 +709,11 @@ class LMCacheMPSchedulerAdapter:
         if not self.is_healthy or not records:
             return
 
+        append_l0_block_boundary_event(
+            "lmcache_vllm_multi_process_adapter",
+            "report_block_allocation_submitted",
+            records,
+        )
         send_lmcache_request(
             self.mq_client,
             RequestType.REPORT_BLOCK_ALLOCATION,

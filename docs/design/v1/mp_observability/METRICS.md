@@ -249,6 +249,14 @@ Sampled (default 1%) GPU KV cache block lifecycle tracking via shadow monitoring
 of `MP_VLLM_BLOCK_ALLOCATION` and `MP_VLLM_END_SESSION` events.  Eviction is
 detected at reallocation time (when a block is assigned different tokens).
 
+L0 uses **random sampling** (`random.random() < sample_rate`) rather than the
+deterministic `hash(key) % prime` gate used by L1 and SM lifecycle subscribers.
+Physical GPU blocks are keyed by `(instance_id, block_id)`, which have high
+churn — block IDs are reused constantly as vLLM allocates and frees them, so
+the same numeric ID may refer to entirely different content across scheduler
+steps.  This makes the block ID an unstable key for hash-based sampling.  In
+contrast, L1 tracks content-addressed `ObjectKey`s which are stable identifiers.
+
 All L0 histograms carry `instance_id` and `model_name` OTel attributes, enabling
 per-instance and per-model Prometheus metric slicing (e.g.
 `lmcache_mp_l0_block_lifetime_seconds{instance_id="12345",model_name="llama-7b"}`).

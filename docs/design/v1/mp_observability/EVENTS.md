@@ -193,9 +193,9 @@ request scope and guard GPU callback races.  Published via `EventBus.publish()`
 | EventType | Metadata keys | Types | Published by / when |
 |---|---|---|---|
 | `CB_REQUEST_START` | *(none)* | — | `BlendEngineV2.cb_lookup_pre_computed` — at request arrival |
-| `CB_STORE_PRE_COMPUTED_SUBMITTED` | `instance_id` | `int` | `BlendEngineV2.cb_store_pre_computed` — before GPU store enqueue |
-| `CB_RETRIEVE_SUBMITTED` | `instance_id` | `int` | `BlendEngineV2.cb_retrieve_pre_computed` — before GPU retrieve enqueue |
-| `CB_STORE_FINAL_SUBMITTED` | `instance_id` | `int` | `BlendEngineV2.cb_store_final` — before GPU store enqueue |
+| `CB_STORE_PRE_COMPUTED_SUBMITTED` | `instance_id`, `num_chunks`, `num_tokens` | `int`, `int`, `int` | `BlendEngineV2.cb_store_pre_computed` — before GPU store enqueue |
+| `CB_RETRIEVE_SUBMITTED` | `instance_id`, `num_chunks`, `num_tokens` | `int`, `int`, `int` | `BlendEngineV2.cb_retrieve_pre_computed` — before GPU retrieve enqueue |
+| `CB_STORE_FINAL_SUBMITTED` | `instance_id`, `num_chunks`, `num_tokens` | `int`, `int`, `int` | `BlendEngineV2.cb_store_final` — before GPU store enqueue |
 | `CB_REQUEST_END` | *(none)* | — | `BlendEngineV2.cb_lookup_pre_computed` (early return: no matches or no GPU context) **or** `BlendEngineV2.cb_store_final` — after SUBMITTED, before GPU work |
 
 ---
@@ -217,3 +217,26 @@ These events use `session_id` on the `Event` dataclass (sourced from
 | `CB_STORE_FINAL_END` | `instance_id`, `num_tokens`, `stored_chunks`, `success` | `int`, `int`, `int`, `bool` |
 | `CB_FINGERPRINTS_REGISTERED` | `num_chunks`, `num_tokens` | `int`, `int` |
 | `CB_CHUNKS_EVICTED` | `num_chunks` | `int` |
+
+---
+
+## Blend Serde Events
+
+Emitted by the serde layer (`AsyncSerdeProcessor` / `SerdeL2AdapterWrapper`)
+to instrument KV↔bytes transform duration, compression ratio, and failure
+rates.  Correlated by `session_id` for START/END pairing.
+
+| EventType | Metadata keys | Types | Notes |
+|---|---|---|---|
+| `CB_SERDE_ENCODE_START` | `serde_type`, `num_objects` | `str`, `int` | Before serialize begins. `serde_type` ∈ {fp8, naive, cachegen, kivi}. |
+| `CB_SERDE_ENCODE_END` | `serde_type`, `num_objects`, `bytes_in`, `bytes_out`, `success`, `failure_reason?` | `str`, `int`, `int`, `int`, `bool`, `str?` | After serialize completes. `failure_reason` present only on failure. |
+| `CB_SERDE_DECODE_START` | `serde_type`, `num_objects` | `str`, `int` | Before deserialize begins. |
+| `CB_SERDE_DECODE_END` | `serde_type`, `num_objects`, `bytes_in`, `bytes_out`, `success`, `failure_reason?` | `str`, `int`, `int`, `int`, `bool`, `str?` | After deserialize completes. |
+
+**Metrics produced** (by `SerdeMetricsSubscriber`):
+
+- `lmcache_blend.serde_encode_duration_seconds` — histogram, attrs: `serde_type`, `success`
+- `lmcache_blend.serde_decode_duration_seconds` — histogram, attrs: `serde_type`, `success`
+- `lmcache_blend.serde_bytes_in` — counter, attrs: `serde_type`, `direction`
+- `lmcache_blend.serde_bytes_out` — counter, attrs: `serde_type`, `direction`
+- `lmcache_blend.serde_failures` — counter, attrs: `serde_type`, `direction`, `failure_reason`

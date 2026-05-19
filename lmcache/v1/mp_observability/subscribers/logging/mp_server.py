@@ -82,9 +82,9 @@ class MPServerLoggingSubscriber(EventSubscriber):
             logger.debug(
                 "vLLM block allocation: req_id=%s "
                 "new_blocks=%d new_tokens=%d "
-                "block_ids=%s",
+                "num_blocks=%d",
                 rec.req_id,
                 len(rec.new_block_ids),
                 len(rec.new_token_ids),
-                rec.new_block_ids[:10],
+                len(rec.new_block_ids),
             )

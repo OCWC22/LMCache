@@ -34,6 +34,7 @@ Limitations:
 from __future__ import annotations
 
 # Standard
+import logging
 from collections import deque
 from dataclasses import dataclass, field
 from enum import Enum
@@ -46,9 +47,16 @@ from opentelemetry import metrics
 # First Party
 from lmcache.v1.mp_observability.event import Event, EventType
 from lmcache.v1.mp_observability.event_bus import EventCallback, EventSubscriber
+from lmcache.v1.mp_observability.l0_boundary_evidence import (
+    append_l0_block_boundary_event,
+)
+
+logger = logging.getLogger(__name__)
 
 # Maximum number of recent access timestamps kept per block (ring buffer).
 _MAX_ACCESS_HISTORY = 4
+# Maximum number of entries in the _skipped set.
+_MAX_SKIPPED = 10_000
 
 
 class _BlockStatus(Enum):
@@ -97,8 +105,23 @@ class L0LifecycleSubscriber(EventSubscriber):
         self._skipped: set[tuple[int, int]] = set()
         # Reverse index: req_id -> set of (instance_id, block_id) owned.
         self._req_blocks: dict[str, set[tuple[int, int]]] = {}
+        self._metrics_updated_count = 0
 
         meter = metrics.get_meter("lmcache.l0")
+        self._allocation_records_counter = meter.create_counter(
+            "lmcache_mp.l0_block_allocation_records",
+            description=(
+                "Total vLLM block allocation records processed by the "
+                "L0 lifecycle subscriber."
+            ),
+        )
+        self._allocated_blocks_counter = meter.create_counter(
+            "lmcache_mp.l0_block_allocated_blocks",
+            description=(
+                "Total vLLM GPU KV cache block IDs processed by the "
+                "L0 lifecycle subscriber."
+            ),
+        )
         self._lifetime_hist = meter.create_histogram(
             "lmcache_mp.l0_block_lifetime_seconds",
             description=(
@@ -140,8 +163,29 @@ class L0LifecycleSubscriber(EventSubscriber):
         records = event.metadata.get("records", [])
         now = event.timestamp or time.time()
 
+        metrics_before = self._metrics_updated_count
+        attrs = {
+            "instance_id": str(instance_id),
+            "model_name": model_name,
+        }
+        block_count = sum(
+            len(getattr(record, "new_block_ids", []) or []) for record in records
+        )
+        if records:
+            self._allocation_records_counter.add(len(records), attrs)
+            self._metrics_updated_count += 1
+        if block_count:
+            self._allocated_blocks_counter.add(block_count, attrs)
+            self._metrics_updated_count += 1
+
         for record in records:
             self._process_record(instance_id, model_name, record, now)
+        append_l0_block_boundary_event(
+            "lmcache_l0_lifecycle_subscriber",
+            "l0_lifecycle_subscriber_processed",
+            records,
+            metrics_updated_count=self._metrics_updated_count - metrics_before,
+        )
 
     def _on_end_session(self, event: Event) -> None:
         """Handle request completion — release blocks owned by this request."""
@@ -205,6 +249,12 @@ class L0LifecycleSubscriber(EventSubscriber):
                 return
 
             if not self._should_sample():
+                if len(self._skipped) >= _MAX_SKIPPED:
+                    self._skipped.pop()
+                    logger.warning(
+                        "_skipped set reached %d entries; evicted one entry",
+                        _MAX_SKIPPED,
+                    )
                 self._skipped.add(block_key)
                 return
 
@@ -277,14 +327,29 @@ class L0LifecycleSubscriber(EventSubscriber):
 
         self._lifetime_hist.record(lifetime, attrs)
         self._idle_hist.record(idle_time, attrs)
+        self._metrics_updated_count += 2
 
         # Reuse gaps from access history.
         history = list(state.access_history)
         for i in range(1, len(history)):
             gap = history[i] - history[i - 1]
             self._reuse_gap_hist.record(gap, attrs)
+            self._metrics_updated_count += 1
 
     # -- Sampling ----------------------------------------------------------
 
     def _should_sample(self) -> bool:
+        """Randomly decide whether to sample this block.
+
+        L0 uses ``random.random()`` rather than the deterministic
+        ``hash(key) % prime`` gate used by L1 and SM lifecycle subscribers.
+        Physical GPU blocks are keyed by ``(instance_id, block_id)`` which
+        have high churn — block IDs are reused constantly as vLLM allocates
+        and frees them.  The numeric block ID is therefore not a stable key
+        for hash-based sampling: the same ID might refer to entirely
+        different content across two scheduler steps.  In contrast, L1
+        tracks content-addressed ``ObjectKey``\\s which are stable and
+        uniquely identify a specific KV chunk, making ``hash(key)`` a
+        reliable deterministic sampling gate.
+        """
         return random.random() < self._sample_rate

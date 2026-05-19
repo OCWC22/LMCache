@@ -44,6 +44,9 @@ from lmcache.v1.mp_observability.config import (
 )
 from lmcache.v1.mp_observability.event import Event, EventType
 from lmcache.v1.mp_observability.event_bus import get_event_bus
+from lmcache.v1.mp_observability.l0_boundary_evidence import (
+    append_l0_block_boundary_event,
+)
 from lmcache.v1.mp_observability.otel_init import register_gauge
 from lmcache.v1.mp_observability.trace import maybe_initialize_trace_recorder
 from lmcache.v1.multiprocess.config import (
@@ -70,7 +73,6 @@ from lmcache.v1.multiprocess.token_hasher import TokenHasher
 import lmcache.c_ops as lmc_ops
 
 logger = init_logger(__name__)
-
 
 # Helper functions
 def compute_extra_count(
@@ -1054,6 +1056,11 @@ class MPCacheEngine:
             records: List of BlockAllocationRecord with per-request
                 block and token allocation deltas.
         """
+        append_l0_block_boundary_event(
+            "lmcache_mp_server",
+            "report_block_allocation_received",
+            records,
+        )
         self._event_bus.publish(
             Event(
                 event_type=EventType.MP_VLLM_BLOCK_ALLOCATION,
