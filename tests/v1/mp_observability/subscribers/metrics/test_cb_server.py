@@ -591,12 +591,12 @@ class TestBlendL0GpuObservability:
             for a in attrs_list
             if a.get("operation") == "store_pre_computed" and a.get("instance_id") == 5
         ]
-        assert len(matching) >= 1, (
-            f"No duration point for store_pre_computed/instance_id=5; got {attrs_list}"
-        )
-        assert matching[0]["direction"] == "gpu_to_l1", (
-            f"Expected direction='gpu_to_l1', got attrs={matching[0]}"
-        )
+        assert (
+            len(matching) >= 1
+        ), f"No duration point for store_pre_computed/instance_id=5; got {attrs_list}"
+        assert (
+            matching[0]["direction"] == "gpu_to_l1"
+        ), f"Expected direction='gpu_to_l1', got attrs={matching[0]}"
 
     def test_retrieve_records_l0_transfer_direction_and_failure_duration(
         self, bus, subscriber
@@ -1072,6 +1072,7 @@ class TestBlendPendingOpsCap:
             EventType.CB_RETRIEVE_START,
         ) not in subscriber._pending_l0_gpu_ops
         assert "three:cb.retrieve.start" in subscriber._pending_l0_gpu_ops
+
     def test_pending_l0_gpu_ops_cap_logs_warning(self, monkeypatch, subscriber):
         """When the cap is exceeded, a warning must be logged via the module logger."""
         from unittest.mock import patch
