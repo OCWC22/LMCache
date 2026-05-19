@@ -19,6 +19,7 @@ import pytest
 from lmcache.integration.vllm import vllm_multi_process_adapter as adapter_mod
 from lmcache.integration.vllm.vllm_multi_process_adapter import (
     LMCacheMPWorkerAdapter,
+    LoadStoreOp,
     ParallelStrategy,
 )
 from lmcache.v1.multiprocess.protocol import RequestType
@@ -98,3 +99,43 @@ def test_register_kv_caches_raises_connection_error_on_timeout(fake_adapter):
 
     with pytest.raises(ConnectionError, match="did not respond"):
         adapter.register_kv_caches({"layer.0": object()})
+
+
+def test_cacheblend_register_kv_caches_uses_cb_protocol(fake_adapter):
+    """CacheBlend mode registers the CB GPU cache, not the normal MP cache."""
+    adapter, send_mock, _future = fake_adapter
+    adapter.enable_cacheblend = True
+
+    adapter.register_kv_caches({"layer.0": object()})
+
+    args, _kwargs = send_mock.call_args
+    assert args[1] == RequestType.CB_REGISTER_KV_CACHE
+    assert len(args[2]) == 4
+
+
+def test_cacheblend_store_slices_tokens_for_cb_protocol(fake_adapter):
+    """CB store keys contain only the stored chunk while offset points at vLLM KV."""
+    adapter, send_mock, future = fake_adapter
+    adapter.enable_cacheblend = True
+    adapter._heartbeat = MagicMock(name="heartbeat")
+    future.to_cuda_future.return_value = future
+    event = MagicMock(name="event")
+    event.ipc_handle.return_value = b"event-handle"
+    op = LoadStoreOp(
+        token_ids=list(range(64)),
+        block_ids=[10, 11],
+        start=16,
+        end=48,
+    )
+
+    adapter.submit_store_request("req-1", op, event)
+
+    args, _kwargs = send_mock.call_args
+    assert args[1] == RequestType.CB_STORE_PRE_COMPUTED
+    key, offset, instance_id, event_handle = args[2]
+    assert tuple(key.token_ids) == tuple(range(16, 48))
+    assert key.start == 0
+    assert key.end == 32
+    assert offset == 16
+    assert instance_id == adapter.instance_id
+    assert event_handle == b"event-handle"

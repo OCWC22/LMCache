@@ -19,6 +19,7 @@ from lmcache.v1.mp_observability.l0_boundary_evidence import (
 )
 from lmcache.v1.multiprocess.custom_types import (
     BlockAllocationRecord,
+    CBMatchResult,
     CudaIPCWrapper,
     IPCCacheEngineKey,
     KVCache,
@@ -44,6 +45,7 @@ class ExtraConfigDefault(enum.Enum):
     # Interval (seconds) between periodic heartbeat pings
     # to the server.
     heartbeat_interval = 10.0
+    cacheblend = os.getenv("LMCACHE_ENABLE_CACHEBLEND", "False")
 
 
 # Backward-compatible aliases for the legacy `lmcache_mp_connector_0180`
@@ -376,6 +378,12 @@ class LoadStoreOp:
     """Number of tokens to skip writing at the beginning of the retrieve
     range. Used to avoid overwriting APC-shared GPU blocks during retrieve."""
 
+    cb_match_result: list[CBMatchResult] | None = None
+    """CacheBlend V2 match metadata returned by CB_LOOKUP_PRE_COMPUTED_V2."""
+
+    cacheblend_store_final: bool = False
+    """Use CB_STORE_FINAL instead of CB_STORE_PRE_COMPUTED for this store."""
+
     def __len__(self) -> int:
         return len(self.block_ids)
 
@@ -439,9 +447,29 @@ class LMCacheMPSchedulerAdapter:
         #   even after the server has already popped the job (exactly-once).
         self._pending_lookups: set[str] = set()
         self._finished_lookup_results: dict[str, int] = {}
+        self._finished_lookup_matches: dict[str, list[CBMatchResult]] = {}
 
         self.model_name = model_name
         self.parallel_strategy = parallel_strategy
+        if extra_config is not None:
+            cfg = _resolve_extra_config(extra_config)
+            cacheblend_raw = cfg[ExtraConfigDefault.cacheblend.name]
+        else:
+            cacheblend_raw = ExtraConfigDefault.cacheblend.value
+        self.enable_cacheblend = str(cacheblend_raw).lower() in {
+            "1",
+            "true",
+            "yes",
+            "on",
+        }
+        logger.info(
+            "%s initialized: adapter_file=%s, "
+            "enable_cacheblend=%s, extra_config_keys=%s",
+            self.__class__.__name__,
+            __file__,
+            self.enable_cacheblend,
+            sorted((extra_config or {}).keys()),
+        )
 
         # Read chunk size from lmcache
         try:
@@ -454,9 +482,9 @@ class LMCacheMPSchedulerAdapter:
                 f"LMCache server did not respond within {self._mq_timeout}s. "
                 "Is the server running?"
             ) from None
-        assert self.chunk_size % vllm_block_size == 0, (
-            "LMCache chunk size should be a multiple of vLLM block size"
-        )
+        assert (
+            self.chunk_size % vllm_block_size == 0
+        ), "LMCache chunk size should be a multiple of vLLM block size"
         self.blocks_in_chunk = self.chunk_size // vllm_block_size
 
         # Health state (shared with heartbeat thread)
@@ -549,21 +577,41 @@ class LMCacheMPSchedulerAdapter:
             cache_salt=cache_salt,
         ).no_worker_id_version()
 
-        future = send_lmcache_request(
-            self.mq_client,
-            RequestType.LOOKUP,
-            [key, self.tp_size],
+        request_type = (
+            RequestType.CB_LOOKUP_PRE_COMPUTED_V2
+            if self.enable_cacheblend
+            else RequestType.LOOKUP
         )
+        payloads = [key] if self.enable_cacheblend else [key, self.tp_size]
+        logger.info(
+            "LMCache MP lookup request: request_id=%s request_type=%s "
+            "enable_cacheblend=%s token_start=%s token_end=%s adapter_file=%s",
+            request_id,
+            request_type.name,
+            self.enable_cacheblend,
+            0,
+            aligned_end,
+            __file__,
+        )
+        future = send_lmcache_request(self.mq_client, request_type, payloads)
         try:
-            future.result(timeout=self._mq_timeout)
+            result = future.result(timeout=self._mq_timeout)
         except TimeoutError:
             logger.warning(
-                "LOOKUP request timed out after %ss. Marking server as unhealthy.",
+                "%s request timed out after %ss. Marking server as unhealthy.",
+                request_type.name,
                 self._mq_timeout,
             )
             self._health_event.clear()
             return
-        self._pending_lookups.add(request_id)
+        if self.enable_cacheblend:
+            matches = list(result or [])
+            self._finished_lookup_matches[request_id] = matches
+            self._finished_lookup_results[request_id] = sum(
+                match.cur_ed - match.cur_st for match in matches
+            )
+        else:
+            self._pending_lookups.add(request_id)
 
     @_lmcache_nvtx_annotate
     def check_lookup_result(self, request_id: str) -> int | None:
@@ -584,7 +632,8 @@ class LMCacheMPSchedulerAdapter:
             None if the lookup request is not finished yet.
         """
         if request_id not in self._pending_lookups:
-            # No job — either unhealthy at submit time or already cleaned up.
+            # No async job — either unhealthy at submit time, CacheBlend lookup
+            # completed synchronously, or the job was already cleaned up.
             # If we have a cached result, return it to handle repeated calls.
             return self._finished_lookup_results.get(request_id, 0)
 
@@ -618,6 +667,10 @@ class LMCacheMPSchedulerAdapter:
         self._finished_lookup_results[request_id] = token_count
         return token_count
 
+    def get_lookup_matches(self, request_id: str) -> list[CBMatchResult]:
+        """Return CacheBlend V2 match metadata for a completed lookup."""
+        return self._finished_lookup_matches.get(request_id, [])
+
     def num_blocks_per_chunk(self) -> int:
         """
         Returns:
@@ -633,6 +686,7 @@ class LMCacheMPSchedulerAdapter:
         """
         self._pending_lookups.discard(request_id)
         self._finished_lookup_results.pop(request_id, None)
+        self._finished_lookup_matches.pop(request_id, None)
 
     def free_lookup_locks(
         self,
@@ -832,6 +886,25 @@ class LMCacheMPWorkerAdapter:
 
         self.model_name = model_name
         self.parallel_strategy = parallel_strategy
+        if extra_config is not None:
+            cfg = _resolve_extra_config(extra_config)
+            cacheblend_raw = cfg[ExtraConfigDefault.cacheblend.name]
+        else:
+            cacheblend_raw = ExtraConfigDefault.cacheblend.value
+        self.enable_cacheblend = str(cacheblend_raw).lower() in {
+            "1",
+            "true",
+            "yes",
+            "on",
+        }
+        logger.info(
+            "%s initialized: adapter_file=%s, "
+            "enable_cacheblend=%s, extra_config_keys=%s",
+            self.__class__.__name__,
+            __file__,
+            self.enable_cacheblend,
+            sorted((extra_config or {}).keys()),
+        )
 
         # Read chunk size from lmcache
         try:
@@ -844,9 +917,9 @@ class LMCacheMPWorkerAdapter:
                 f"LMCache server did not respond within {self._mq_timeout}s. "
                 "Is the server running?"
             ) from None
-        assert chunk_size % vllm_block_size == 0, (
-            "LMCache chunk size should be a multiple of vLLM block size"
-        )
+        assert (
+            chunk_size % vllm_block_size == 0
+        ), "LMCache chunk size should be a multiple of vLLM block size"
         self.blocks_in_chunk = chunk_size // vllm_block_size
         # Retain the vLLM logical block size so we can ship it to the
         # LMCache server in ``register_kv_caches`` — the server uses it
@@ -954,18 +1027,34 @@ class LMCacheMPWorkerAdapter:
         layout_hints["inference_engine_logical_block_size"] = (
             self.vllm_logical_block_size
         )
-        future = send_lmcache_request(
-            self.mq_client,
-            RequestType.REGISTER_KV_CACHE,
-            [
+        if self.enable_cacheblend:
+            request_type = RequestType.CB_REGISTER_KV_CACHE
+            payloads = [
+                self.instance_id,
+                wrap_kv_caches(kv_caches),
+                self.model_name,
+                self.world_size,
+            ]
+        else:
+            request_type = RequestType.REGISTER_KV_CACHE
+            payloads = [
                 self.instance_id,
                 wrap_kv_caches(kv_caches),
                 self.model_name,
                 self.world_size,
                 EngineType.VLLM,
                 layout_hints,
-            ],
+            ]
+        logger.info(
+            "LMCache MP register request: request_type=%s enable_cacheblend=%s "
+            "model=%s world_size=%s adapter_file=%s",
+            request_type.name,
+            self.enable_cacheblend,
+            self.model_name,
+            self.world_size,
+            __file__,
         )
+        future = send_lmcache_request(self.mq_client, request_type, payloads)
         try:
             future.result(timeout=self._mq_timeout)
         except TimeoutError:
@@ -1050,17 +1139,39 @@ class LMCacheMPWorkerAdapter:
             return
 
         assert op.token_ids is not None
-        key = self._create_key(
-            op.token_ids,
-            op.start,
-            op.end,
-            request_id=request_id,
-            cache_salt=cache_salt,
-        )
+        if self.enable_cacheblend:
+            # CacheBlend store APIs treat key.token_ids as the document/chunk
+            # being registered and copy from the vLLM KV buffer at `offset`.
+            # The normal STORE path instead carries the full request token_ids
+            # plus start/end. Keep those semantics separate.
+            store_token_ids = op.token_ids[op.start : op.end]
+            key = self._create_key(
+                store_token_ids,
+                0,
+                len(store_token_ids),
+                request_id=request_id,
+                cache_salt=cache_salt,
+            )
+            request_type = (
+                RequestType.CB_STORE_FINAL
+                if op.cacheblend_store_final
+                else RequestType.CB_STORE_PRE_COMPUTED
+            )
+            payloads = [key, op.start, self.instance_id, event.ipc_handle()]
+        else:
+            key = self._create_key(
+                op.token_ids,
+                op.start,
+                op.end,
+                request_id=request_id,
+                cache_salt=cache_salt,
+            )
+            request_type = RequestType.STORE
+            payloads = [key, self.instance_id, op.block_ids, event.ipc_handle()]
         future = send_lmcache_request(
             self.mq_client,
-            RequestType.STORE,
-            [key, self.instance_id, op.block_ids, event.ipc_handle()],
+            request_type,
+            payloads,
         ).to_cuda_future()
         self.store_futures[request_id] = future
 
@@ -1096,16 +1207,28 @@ class LMCacheMPWorkerAdapter:
             request_id=request_id,
             cache_salt=cache_salt,
         )
-        future = send_lmcache_request(
-            self.mq_client,
-            RequestType.RETRIEVE,
-            [
+        if self.enable_cacheblend:
+            request_type = RequestType.CB_RETRIEVE_PRE_COMPUTED_V2
+            payloads = [
+                key,
+                op.cb_match_result or [],
+                op.start,
+                self.instance_id,
+                event.ipc_handle(),
+            ]
+        else:
+            request_type = RequestType.RETRIEVE
+            payloads = [
                 key,
                 self.instance_id,
                 op.block_ids,
                 event.ipc_handle(),
                 op.skip_first_n_tokens,
-            ],
+            ]
+        future = send_lmcache_request(
+            self.mq_client,
+            request_type,
+            payloads,
         ).to_cuda_future()
         self.retrieve_futures[request_id] = (future, list(op.block_ids))
 

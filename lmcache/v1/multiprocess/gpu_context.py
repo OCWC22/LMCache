@@ -442,9 +442,9 @@ class PlainGPUCacheContext:
     """
 
     def __init__(self, kv_caches: KVCache, lmcache_chunk_size: int = 256):
-        assert len(kv_caches) == 1, (
-            "PlainGPUCacheContext only supports a single KV cache tensor"
-        )
+        assert (
+            len(kv_caches) == 1
+        ), "PlainGPUCacheContext only supports a single KV cache tensor"
 
         # KV cache basics
         self._kv_cache = unwrap_kv_cache_tensors(kv_caches)[0]
@@ -547,3 +547,172 @@ class PlainGPUCacheContext:
     @property
     def kv_cache_tensor(self) -> torch.Tensor:
         return self._kv_cache
+
+
+class _PagedTokenSlice:
+    """Writable token-slice facade for vLLM's per-layer paged KV tensors."""
+
+    def __init__(
+        self,
+        parent: "PagedGPUCacheBlendContext",
+        start: int,
+        end: int,
+    ) -> None:
+        self._parent = parent
+        self._start = start
+        self._end = end
+
+    def copy_(
+        self, src: torch.Tensor, non_blocking: bool = False
+    ) -> "_PagedTokenSlice":
+        expected = self._parent.get_kv_buffer_shape(self._end - self._start)
+        if tuple(src.shape) != tuple(expected):
+            raise ValueError(
+                f"Expected source shape {tuple(expected)} for paged CB copy, "
+                f"got {tuple(src.shape)}"
+            )
+        for layer_idx, layer_cache in enumerate(self._parent._kv_caches):
+            target = self._parent._layer_token_view(layer_cache)[
+                :, self._start : self._end, :
+            ]
+            target.copy_(src[:, layer_idx, :, :], non_blocking=non_blocking)
+        return self
+
+
+class PagedGPUCacheBlendContext:
+    """CacheBlend context for vLLM's per-layer paged KV tensors.
+
+    CacheBlend's original ``PlainGPUCacheContext`` expects a single contiguous
+    ``[2, L, T, D]`` tensor. vLLM V1 registers one paged tensor per layer
+    instead. This adapter presents the same token-slice API expected by
+    ``blend_server_v2`` while reading/writing directly from/to the live vLLM
+    layer tensors, so CacheBlend can run without a second plain KV arena.
+    """
+
+    def __init__(self, kv_caches: KVCache, lmcache_chunk_size: int = 256):
+        self._kv_caches = unwrap_kv_cache_tensors(kv_caches)
+        if not self._kv_caches:
+            raise ValueError(
+                "PagedGPUCacheBlendContext requires at least one KV tensor"
+            )
+
+        self._device = self._kv_caches[0].device
+        self._dtype = self._kv_caches[0].dtype
+        self._num_layers = len(self._kv_caches)
+        first_view = self._layer_token_view(self._kv_caches[0])
+        self._num_tokens = first_view.shape[1]
+        self._hidden_dim_size = first_view.shape[2]
+
+        for idx, tensor in enumerate(self._kv_caches):
+            view = self._layer_token_view(tensor)
+            if tensor.device != self._device:
+                raise ValueError("All paged CB KV tensors must be on the same device")
+            if tensor.dtype != self._dtype:
+                raise ValueError("All paged CB KV tensors must have the same dtype")
+            if view.shape[1:] != first_view.shape[1:]:
+                expected_shape = tuple(first_view.shape[1:])
+                actual_shape = tuple(view.shape[1:])
+                raise ValueError(
+                    "Paged CB KV tensor shape mismatch at layer "
+                    f"{idx}: expected token/hidden shape {expected_shape}, "
+                    f"got {actual_shape}"
+                )
+
+        self._tmp_gpu_buffer = torch.empty(
+            self.get_kv_buffer_shape(lmcache_chunk_size),
+            dtype=self.dtype,
+            device=self.device,
+        )
+        self._cuda_stream = torch_dev.Stream(device=self._device)
+        self._cupy_stream = cupy.cuda.ExternalStream(
+            self._cuda_stream.cuda_stream, self._device.index
+        )
+        _, high_priority = torch_dev.Stream.priority_range()
+        self._high_priority_cuda_stream = torch_dev.Stream(
+            device=self._device, priority=high_priority
+        )
+        self._high_priority_cupy_stream = cupy.cuda.ExternalStream(
+            self._high_priority_cuda_stream.cuda_stream, self._device.index
+        )
+
+    def _layer_token_view(self, tensor: torch.Tensor) -> torch.Tensor:
+        """Return a per-layer ``[2, T, D]`` token view."""
+        if tensor.ndim == 5 and tensor.shape[0] == 2:
+            return tensor.reshape(2, tensor.shape[1] * tensor.shape[2], -1)
+        if tensor.ndim == 5 and tensor.shape[2] == 2:
+            return tensor.permute(2, 0, 1, 3, 4).reshape(
+                2, tensor.shape[0] * tensor.shape[1], -1
+            )
+        if tensor.ndim == 4 and tensor.shape[0] == 2:
+            return tensor.reshape(2, tensor.shape[1] * tensor.shape[2], -1)
+        if tensor.ndim == 3 and tensor.shape[0] == 2:
+            return tensor.reshape(2, tensor.shape[1], -1)
+        raise ValueError(
+            "Unsupported paged CB KV tensor shape: "
+            f"{tuple(tensor.shape)}; expected [2,B,S,H,D], [B,S,2,H,D], "
+            "[2,B,S,D], or [2,T,D]"
+        )
+
+    def get_kv_buffer_shape(self, num_tokens: int) -> torch.Size:
+        return torch.Size((2, self._num_layers, num_tokens, self._hidden_dim_size))
+
+    def get_tmp_gpu_buffer(self, num_tokens: int) -> torch.Tensor:
+        return self._tmp_gpu_buffer[:, :, :num_tokens, :]
+
+    def slice_kv_cache_on_tokens(self, start: int, end: int) -> torch.Tensor:
+        if start < 0 or end < start or end > self._num_tokens:
+            raise ValueError(
+                f"Invalid paged CB token slice [{start}, {end}) for "
+                f"{self._num_tokens} tokens"
+            )
+        return torch.stack(
+            [
+                self._layer_token_view(layer_cache)[:, start:end, :]
+                for layer_cache in self._kv_caches
+            ],
+            dim=1,
+        )
+
+    def writable_slice_on_tokens(self, start: int, end: int) -> _PagedTokenSlice:
+        if start < 0 or end < start or end > self._num_tokens:
+            raise ValueError(
+                f"Invalid paged CB token slice [{start}, {end}) for "
+                f"{self._num_tokens} tokens"
+            )
+        return _PagedTokenSlice(self, start, end)
+
+    @property
+    def dtype(self) -> torch.dtype:
+        return self._dtype
+
+    @property
+    def device(self) -> torch.device:
+        return self._device
+
+    @property
+    def stream(self) -> Any:
+        return self._cuda_stream
+
+    @property
+    def cupy_stream(self) -> cupy.cuda.Stream:
+        return self._cupy_stream
+
+    @property
+    def high_priority_stream(self) -> Any:
+        return self._high_priority_cuda_stream
+
+    @property
+    def high_priority_cupy_stream(self) -> cupy.cuda.Stream:
+        return self._high_priority_cupy_stream
+
+    @property
+    def num_layers(self) -> int:
+        return self._num_layers
+
+    @property
+    def num_tokens(self) -> int:
+        return self._num_tokens
+
+    @property
+    def hidden_dim_size(self) -> int:
+        return self._hidden_dim_size
