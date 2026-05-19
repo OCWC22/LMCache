@@ -1072,7 +1072,6 @@ class TestBlendPendingOpsCap:
             EventType.CB_RETRIEVE_START,
         ) not in subscriber._pending_l0_gpu_ops
         assert "three:cb.retrieve.start" in subscriber._pending_l0_gpu_ops
-
     def test_pending_l0_gpu_ops_cap_logs_warning(self, monkeypatch, subscriber):
         """When the cap is exceeded, a warning must be logged via the module logger."""
         from unittest.mock import patch

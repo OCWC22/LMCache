@@ -586,7 +586,6 @@ class TestSerdePendingOpsCap:
         assert len(subscriber._pending_ops) == 2
         assert "encode:one" not in subscriber._pending_ops
         assert "encode:three" in subscriber._pending_ops
-
     def test_pending_ops_cap_logs_warning(self, monkeypatch, subscriber):
         """When the cap is exceeded, a warning must be logged via the module logger."""
         from unittest.mock import patch
